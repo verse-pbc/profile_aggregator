@@ -9,12 +9,14 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /usr/src/app
 
-# Copy the entire workspace for building
+# Copy cargo files for dependency caching
 COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
 
-# Build the profile_aggregator binary
-RUN cargo build --release -p profile_aggregator
+# Copy source code
+COPY src ./src
+
+# Build the binary
+RUN cargo build --release
 
 FROM debian:bookworm-slim
 
@@ -39,7 +41,7 @@ ENV RELAY_URL=ws://localhost:8080
 ENV DISCOVERY_RELAY_URL=wss://relay.nos.social
 ENV BIND_ADDR=0.0.0.0:8080
 ENV RELAY_CONTACT=admin@relay.example
-ENV RELAY_SECRET_KEY=339e1ab1f59eb304b8cb5202eddcc437ff699fc523161b6e2c222590cccb3b84
+# RELAY_SECRET_KEY should be provided at runtime
 ENV PAGE_SIZE=500
 ENV INITIAL_BACKOFF_SECS=2
 ENV MAX_BACKOFF_SECS=300
