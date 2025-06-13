@@ -2044,7 +2044,7 @@ dependencies = [
 [[package]]
 name = "nostr_relay_builder"
 version = "0.1.0"
-source = "git+https://github.com/verse-pbc/groups_relay?branch=main#142911910db6ec0b1dccf40c954f020c7b87142b"
+source = "git+https://github.com/verse-pbc/groups_relay?branch=main#5b3782c9ab48daaaaef2257e3925ccc980ba42e4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4021,7 +4021,7 @@ dependencies = [
 [[package]]
 name = "websocket_builder"
 version = "0.1.0"
-source = "git+https://github.com/verse-pbc/groups_relay?branch=main#142911910db6ec0b1dccf40c954f020c7b87142b"
+source = "git+https://github.com/verse-pbc/groups_relay?branch=main#5b3782c9ab48daaaaef2257e3925ccc980ba42e4"
 dependencies = [
  "anyhow",
  "async-trait",
