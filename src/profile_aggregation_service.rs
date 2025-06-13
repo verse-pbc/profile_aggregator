@@ -3,8 +3,8 @@
 //! This service fetches user profiles from external relays, validates their quality,
 //! and saves accepted profiles to the database for broadcasting.
 
-use crate::profile_validation_pool::ProfileValidationPool;
 use crate::profile_quality_filter::ProfileQualityFilter;
+use crate::profile_validation_pool::ProfileValidationPool;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use nostr_relay_builder::RelayDatabase;
@@ -103,26 +103,28 @@ impl ProfileAggregationService {
         };
 
         let cancellation_token = CancellationToken::new();
-        
+
         // Create gossip-enabled client for outbox verification
         info!("Creating gossip client for outbox verification");
         let gossip_keys = Keys::generate();
-        
+
         // Configure gossip client to be respectful of relays
         let gossip_options = Options::new()
             .gossip(true)
             .max_avg_latency(Duration::from_secs(2)) // Skip slow relays
             .automatic_authentication(true);
-        
+
         let gossip_client = Client::builder()
             .signer(gossip_keys)
             .opts(gossip_options)
             .build();
-        
+
         // Add discovery relay
-        gossip_client.add_discovery_relay("wss://relay.nos.social").await?;
+        gossip_client
+            .add_discovery_relay("wss://relay.nos.social")
+            .await?;
         gossip_client.connect().await;
-        
+
         let gossip_client = Arc::new(gossip_client);
 
         // Create profile validation pool with gossip client

@@ -1,6 +1,6 @@
 //! Profile quality filter implementation
 
-use crate::profile_image_validator::{ProfileImageValidator, ImageInfo};
+use crate::profile_image_validator::{ImageInfo, ProfileImageValidator};
 use async_trait::async_trait;
 use nostr_relay_builder::{Error, EventContext, EventProcessor, RelayDatabase, StoreCommand};
 use nostr_sdk::prelude::*;
@@ -66,7 +66,6 @@ impl ProfileQualityFilter {
         }
     }
 
-
     /// Apply the quality filter to an event with gossip client for outbox verification
     pub async fn apply_filter_with_gossip(
         &self,
@@ -74,7 +73,8 @@ impl ProfileQualityFilter {
         subdomain: nostr_lmdb::Scope,
         gossip_client: &Client,
     ) -> Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
-        self.apply_filter_internal(event, subdomain, Some(gossip_client)).await
+        self.apply_filter_internal(event, subdomain, Some(gossip_client))
+            .await
     }
 
     /// Apply the quality filter to an event (without outbox verification)
@@ -85,7 +85,7 @@ impl ProfileQualityFilter {
     ) -> Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
         self.apply_filter_internal(event, subdomain, None).await
     }
-    
+
     /// Internal filter application logic
     async fn apply_filter_internal(
         &self,
@@ -173,21 +173,37 @@ impl ProfileQualityFilter {
                 Ok(events) => {
                     let mut has_text_note = false;
                     let mut relay_events = Vec::new();
-                    
+
                     // Check what we found
-                    debug!("Fetched {} total events for {}", events.len(), event.pubkey.to_hex()[..8].to_string() + "...");
+                    debug!(
+                        "Fetched {} total events for {}",
+                        events.len(),
+                        event.pubkey.to_hex()[..8].to_string() + "..."
+                    );
                     for fetched_event in events {
                         match fetched_event.kind.as_u16() {
-                            1 => { // TextNote
+                            1 => {
+                                // TextNote
                                 has_text_note = true;
-                                debug!("Found TextNote for {} via outbox", event.pubkey.to_hex()[..8].to_string() + "...");
+                                debug!(
+                                    "Found TextNote for {} via outbox",
+                                    event.pubkey.to_hex()[..8].to_string() + "..."
+                                );
                             }
-                            10002 => { // Relay list
-                                debug!("Found relay list for {}", event.pubkey.to_hex()[..8].to_string() + "...");
+                            10002 => {
+                                // Relay list
+                                debug!(
+                                    "Found relay list for {}",
+                                    event.pubkey.to_hex()[..8].to_string() + "..."
+                                );
                                 relay_events.push((fetched_event, "relay list"));
                             }
-                            10050 => { // DM relay metadata
-                                debug!("Found DM relay metadata for {}", event.pubkey.to_hex()[..8].to_string() + "...");
+                            10050 => {
+                                // DM relay metadata
+                                debug!(
+                                    "Found DM relay metadata for {}",
+                                    event.pubkey.to_hex()[..8].to_string() + "..."
+                                );
                                 relay_events.push((fetched_event, "DM relays"));
                             }
                             kind => {
@@ -195,50 +211,60 @@ impl ProfileQualityFilter {
                             }
                         }
                     }
-                    
+
                     // Only accept profile if they have published a TextNote
                     if !has_text_note {
-                        debug!("Rejecting profile {} - no TextNote found via outbox", 
-                            event.pubkey.to_hex()[..8].to_string() + "...");
+                        debug!(
+                            "Rejecting profile {} - no TextNote found via outbox",
+                            event.pubkey.to_hex()[..8].to_string() + "..."
+                        );
                         return self.get_delete_if_exists(event.pubkey, &subdomain).await;
                     }
-                    
+
                     // Profile passed - prepare store commands
                     let mut commands = vec![StoreCommand::SaveSignedEvent(
                         Box::new(event.clone()),
                         subdomain.clone(),
                     )];
-                    
+
                     // Add relay events since profile was accepted
                     for (relay_event, event_type) in relay_events {
-                        debug!("Saving {} for accepted profile {}", 
-                            event_type, event.pubkey.to_hex()[..8].to_string() + "...");
+                        debug!(
+                            "Saving {} for accepted profile {}",
+                            event_type,
+                            event.pubkey.to_hex()[..8].to_string() + "..."
+                        );
                         commands.push(StoreCommand::SaveSignedEvent(
-                            Box::new(relay_event), 
-                            subdomain.clone()
+                            Box::new(relay_event),
+                            subdomain.clone(),
                         ));
                     }
-                    
+
                     debug!(
                         "✅ Profile {} passed all checks ({}x{} image, has published TextNote)",
                         event.pubkey.to_hex()[..8].to_string() + "...",
                         image_info.width,
                         image_info.height
                     );
-                    
+
                     Ok(commands)
                 }
                 Err(e) => {
-                    debug!("Failed to verify outbox for {}: {}", 
-                        event.pubkey.to_hex()[..8].to_string() + "...", e);
+                    debug!(
+                        "Failed to verify outbox for {}: {}",
+                        event.pubkey.to_hex()[..8].to_string() + "...",
+                        e
+                    );
                     // Treat verification errors as no activity to err on the side of caution
                     self.get_delete_if_exists(event.pubkey, &subdomain).await
                 }
             }
         } else {
             // No gossip client available - reject
-            debug!("Rejecting profile {} - no gossip client available for verification", 
-                event.pubkey.to_hex()[..8].to_string() + "...");
+            debug!(
+                "Rejecting profile {} - no gossip client available for verification",
+                event.pubkey.to_hex()[..8].to_string() + "..."
+            );
             self.get_delete_if_exists(event.pubkey, &subdomain).await
         }
     }
@@ -273,17 +299,14 @@ impl ProfileQualityFilter {
     ) -> Result<Vec<Event>, Box<dyn std::error::Error + Send + Sync>> {
         let mut all_events = Vec::new();
         let timeout = std::time::Duration::from_secs(5);
-        
+
         // Query 1: Check for any TextNote (limit 1 since we only need to verify existence)
-        let text_note_filter = Filter::new()
-            .author(pubkey)
-            .kind(Kind::TextNote)
-            .limit(1);
-            
+        let text_note_filter = Filter::new().author(pubkey).kind(Kind::TextNote).limit(1);
+
         if let Ok(events) = client.fetch_events(text_note_filter, timeout).await {
             all_events.extend(events.into_iter());
         }
-        
+
         // Query 2: Fetch replaceable events (relay list and DM relays)
         let relay_filter = Filter::new()
             .author(pubkey)
@@ -292,20 +315,27 @@ impl ProfileQualityFilter {
                 Kind::Custom(10050), // DM relay list
             ])
             .limit(2); // At most one of each replaceable event
-            
+
         match client.fetch_events(relay_filter, timeout).await {
             Ok(events) => {
-                debug!("Found {} relay events for {}", events.len(), pubkey.to_hex()[..8].to_string() + "...");
+                debug!(
+                    "Found {} relay events for {}",
+                    events.len(),
+                    pubkey.to_hex()[..8].to_string() + "..."
+                );
                 all_events.extend(events.into_iter());
             }
             Err(e) => {
-                debug!("Failed to fetch relay events for {}: {}", pubkey.to_hex()[..8].to_string() + "...", e);
+                debug!(
+                    "Failed to fetch relay events for {}: {}",
+                    pubkey.to_hex()[..8].to_string() + "...",
+                    e
+                );
             }
         }
 
         Ok(all_events)
     }
-
 }
 
 #[async_trait]

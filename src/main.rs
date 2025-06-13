@@ -29,9 +29,10 @@ async fn main() -> Result<()> {
     fmt().with_env_filter(env_filter).with_target(true).init();
 
     // Load relay keys from environment or use default dev key
-    let relay_secret = std::env::var("RELAY_SECRET_KEY")
-        .unwrap_or_else(|_| "339e1ab1f59eb304b8cb5202eddcc437ff699fc523161b6e2c222590cccb3b84".to_string());
-    
+    let relay_secret = std::env::var("RELAY_SECRET_KEY").unwrap_or_else(|_| {
+        "339e1ab1f59eb304b8cb5202eddcc437ff699fc523161b6e2c222590cccb3b84".to_string()
+    });
+
     let keys = Keys::parse(&relay_secret)?;
     println!("🔑 Relay public key: {}", keys.public_key());
 
@@ -43,11 +44,8 @@ async fn main() -> Result<()> {
     ));
     let database_path = std::env::var("DATABASE_PATH")
         .unwrap_or_else(|_| "./data/profile_aggregator.db".to_string());
-    
-    let database = Arc::new(RelayDatabase::new(
-        &database_path,
-        crypto_worker,
-    )?);
+
+    let database = Arc::new(RelayDatabase::new(&database_path, crypto_worker)?);
 
     // Configure the relay
     let relay_url =
@@ -63,24 +61,24 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "500".to_string())
         .parse()
         .unwrap_or(500);
-    
+
     let initial_backoff_secs: u64 = std::env::var("INITIAL_BACKOFF_SECS")
         .unwrap_or_else(|_| "2".to_string())
         .parse()
         .unwrap_or(2);
-    
+
     let max_backoff_secs: u64 = std::env::var("MAX_BACKOFF_SECS")
         .unwrap_or_else(|_| "300".to_string())
         .parse()
         .unwrap_or(300);
-    
+
     let worker_threads: usize = std::env::var("WORKER_THREADS")
         .unwrap_or_else(|_| "20".to_string())
         .parse()
         .unwrap_or(20);
-    
-    let state_file = std::env::var("STATE_FILE")
-        .unwrap_or_else(|_| "./data/aggregation_state.json".to_string());
+
+    let state_file =
+        std::env::var("STATE_FILE").unwrap_or_else(|_| "./data/aggregation_state.json".to_string());
 
     let aggregation_config = ProfileAggregationConfig {
         relay_urls: discovery_relay_urls.clone(),

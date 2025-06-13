@@ -96,11 +96,14 @@ impl ProfileValidationPool {
                             metrics.processed_profiles.fetch_add(1, Ordering::Relaxed);
 
                             // Process the event with gossip client
-                            match filter.apply_filter_with_gossip(
-                                req.event.clone(), 
-                                req.scope.clone(), 
-                                gossip_client.as_ref()
-                            ).await {
+                            match filter
+                                .apply_filter_with_gossip(
+                                    req.event.clone(),
+                                    req.scope.clone(),
+                                    gossip_client.as_ref(),
+                                )
+                                .await
+                            {
                                 Ok(commands) => {
                                     // Successfully processed
                                     if commands.is_empty() {

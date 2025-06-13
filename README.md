@@ -1,15 +1,14 @@
 # Profile Aggregator
 
-A Nostr relay service that aggregates and verifies user profile information, including profile picture validation and quality filtering.
+A specialized Nostr relay built with [nostr_relay_builder](https://github.com/verse-pbc/groups_relay/tree/main/crates/nostr_relay_builder) that aggregates high-quality user profiles.
 
 ## Features
 
-- **Profile Event Aggregation**: Collects kind 0 (metadata) and kind 10000 (mute list) events from discovery relays
-- **Profile Picture Validation**: Validates profile pictures by downloading and checking image formats
-- **Quality Filtering**: Filters low-quality profiles based on configurable criteria
-- **Efficient Storage**: Uses LMDB for fast, persistent storage of profile data
-- **WebSocket API**: Compatible with standard Nostr relay protocols
-- **Configurable Pagination**: Supports paginated profile fetching from discovery relays
+- Fetches kind 0 (metadata) events from discovery relays
+- Validates profiles have published content (kind 1) via outbox verification
+- Filters low-quality profiles (missing bio, small images, bot accounts)
+- Discovers and stores user relay preferences (kinds 10002, 10050)
+- Validates profile pictures (minimum 300x600px, excludes placeholders)
 
 ## Installation
 
@@ -76,58 +75,36 @@ services:
 
 ## API Endpoints
 
-The service implements the standard Nostr relay protocol over WebSocket:
+- `ws://localhost:8080` - WebSocket endpoint
+- `http://localhost:8080/health` - Health check
 
-- `ws://localhost:8080` - WebSocket endpoint for Nostr protocol
-- `http://localhost:8080/health` - Health check endpoint
+## How it Works
 
-### Supported NIPs
-
-- NIP-01: Basic protocol flow
-- NIP-09: Event deletion
-- NIP-11: Relay information document
-- NIP-40: Expiration timestamp
-- NIP-42: Authentication (optional)
-- NIP-70: Protected events
-
-## Architecture
-
-The profile aggregator consists of several components:
-
-1. **Discovery Service**: Connects to configured relay and fetches profile events
-2. **Image Validator**: Downloads and validates profile pictures
-3. **Quality Filter**: Applies quality criteria to filter profiles
-4. **Storage Layer**: Persists profiles in LMDB database
-5. **WebSocket Server**: Serves filtered profiles via Nostr protocol
+1. Connects to discovery relay and fetches metadata events
+2. For each profile, validates:
+   - Has name and bio
+   - Profile picture is valid and large enough
+   - User has published at least one text note (outbox verification)
+   - Not a bot or bridge account
+3. Stores accepted profiles and relay preferences in LMDB
+4. Serves filtered profiles via standard Nostr relay protocol
 
 ## Development
 
-### Running Tests
-
 ```bash
 cargo test
-```
-
-### Building Docker Image
-
-```bash
+cargo build --release
 docker build -t profile_aggregator .
-```
-
-### Running with Docker Compose
-
-```bash
-docker compose up -d
 ```
 
 ## Deployment
 
-The service can be deployed using Ansible. See the `ansible/` directory for deployment playbooks and configuration.
+Deploy with Ansible:
+
+```bash
+ansible-playbook -i inventories/profile_aggregator/inventory.yml playbooks/profile_aggregator.yml --ask-vault-pass
+```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+MIT License
