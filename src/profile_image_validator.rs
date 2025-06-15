@@ -227,12 +227,21 @@ impl ProfileImageValidator {
             if let Ok(retry_str) = retry_after.to_str() {
                 // Retry-After can be seconds or HTTP date
                 if let Ok(seconds) = retry_str.parse::<u64>() {
-                    self.rate_limit_manager
-                        .update_rate_limiter(domain, Some(seconds))
-                        .await;
+                    // Only update if seconds > 0
+                    if seconds > 0 {
+                        self.rate_limit_manager
+                            .update_rate_limiter(domain, Some(seconds))
+                            .await;
+                        return;
+                    }
                 }
             }
         }
+
+        // No valid retry-after header, use default rate limit
+        self.rate_limit_manager
+            .update_rate_limiter(domain, None)
+            .await;
     }
 
     fn analyze_data_url(&self, url: &str) -> Result<ImageInfo, Box<dyn Error + Send + Sync>> {

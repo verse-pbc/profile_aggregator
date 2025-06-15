@@ -204,12 +204,14 @@ impl ProfileAggregationService {
                 _ = metrics_interval.tick() => {
                     let metrics = validation_pool.metrics();
                     info!(
-                        "Profile validation metrics: queued={}, processed={}, accepted={}, rejected={}, failed={}",
+                        "Profile validation metrics: queued={}, processed={}, accepted={}, rejected={}, failed={}, rate_limited={}, delayed={}",
                         metrics.queued_operations,
                         metrics.processed_profiles,
                         metrics.accepted_profiles,
                         metrics.rejected_profiles,
-                        metrics.failed_operations
+                        metrics.failed_operations,
+                        metrics.rate_limited_retries,
+                        metrics.delayed_operations
                     );
                 }
             }

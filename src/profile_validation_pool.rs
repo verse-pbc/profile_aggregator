@@ -223,10 +223,12 @@ impl ProfileValidationPool {
         ctx: &ProcessContext<'_>,
         worker_id: usize,
     ) {
-        // Update metrics
-        ctx.metrics
-            .queued_operations
-            .fetch_sub(1, AtomicOrdering::Relaxed);
+        // Update metrics - use saturating_sub to prevent underflow
+        let _ = ctx.metrics.queued_operations.fetch_update(
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+            |val| val.checked_sub(1),
+        );
         ctx.metrics
             .processed_profiles
             .fetch_add(1, AtomicOrdering::Relaxed);

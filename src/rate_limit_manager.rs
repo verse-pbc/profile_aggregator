@@ -6,22 +6,29 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 type DomainRateLimiter = RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>;
 
+/// Tracks rate limit state for a domain
+struct DomainRateLimitState {
+    limiter: Arc<DomainRateLimiter>,
+    consecutive_429s: u32,
+    last_429_time: Option<Instant>,
+}
+
 /// Manages rate limiting for domains across the application
 pub struct RateLimitManager {
-    // Rate limiters per domain
-    domain_rate_limiters: Arc<Mutex<HashMap<String, Arc<DomainRateLimiter>>>>,
+    // Rate limiters and state per domain
+    domain_states: Arc<Mutex<HashMap<String, DomainRateLimitState>>>,
 }
 
 impl RateLimitManager {
     pub fn new() -> Self {
         Self {
-            domain_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
+            domain_states: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -38,10 +45,10 @@ impl RateLimitManager {
             .to_string();
 
         // Check if we have a rate limiter for this domain
-        let limiters = self.domain_rate_limiters.lock().await;
-        if let Some(rate_limiter) = limiters.get(&domain) {
+        let states = self.domain_states.lock().await;
+        if let Some(state) = states.get(&domain) {
             // Check if we can make a request now
-            match rate_limiter.check_key(&domain) {
+            match state.limiter.check_key(&domain) {
                 Ok(_) => Ok(false), // Not rate limited
                 Err(not_until) => {
                     let wait_time = not_until.wait_time_from(Clock::now(&DefaultClock::default()));
@@ -66,10 +73,10 @@ impl RateLimitManager {
             .ok_or("Invalid URL: no domain")?
             .to_string();
 
-        let limiters = self.domain_rate_limiters.lock().await;
-        if let Some(rate_limiter) = limiters.get(&domain) {
-            match rate_limiter.check_key(&domain) {
-                Ok(_) => Ok(None), // Not rate limited
+        let states = self.domain_states.lock().await;
+        if let Some(state) = states.get(&domain) {
+            match state.limiter.check_key(&domain) {
+                Ok(_) => Ok(None),
                 Err(not_until) => {
                     let wait_time = not_until.wait_time_from(Clock::now(&DefaultClock::default()));
                     Ok(Some(wait_time))
@@ -82,27 +89,55 @@ impl RateLimitManager {
 
     /// Update rate limiter based on 429 response
     pub async fn update_rate_limiter(&self, domain: &str, retry_after_seconds: Option<u64>) {
-        let mut limiters = self.domain_rate_limiters.lock().await;
+        let mut states = self.domain_states.lock().await;
+        let now = Instant::now();
 
-        // Calculate appropriate quota based on retry-after
-        let quota = if let Some(seconds) = retry_after_seconds {
-            // If we need to wait N seconds, allow 1 request per N seconds
+        // Get or create state for this domain
+        let state = states
+            .entry(domain.to_string())
+            .or_insert_with(|| DomainRateLimitState {
+                limiter: Arc::new(RateLimiter::keyed(Quota::per_minute(
+                    NonZeroU32::new(60).unwrap(),
+                ))),
+                consecutive_429s: 0,
+                last_429_time: None,
+            });
+
+        // Reset consecutive 429s if it's been more than 5 minutes since last 429
+        if let Some(last_time) = state.last_429_time {
+            if now.duration_since(last_time) > Duration::from_secs(300) {
+                state.consecutive_429s = 0;
+            }
+        }
+
+        // Update consecutive 429 count
+        state.consecutive_429s += 1;
+        state.last_429_time = Some(now);
+
+        // Calculate appropriate quota based on retry-after or exponential backoff
+        let (quota, wait_description) = if let Some(seconds) = retry_after_seconds {
+            // Use the server-provided retry-after
             let requests_per_minute = (60.0 / seconds.max(1) as f64).ceil() as u32;
-            Quota::per_minute(NonZeroU32::new(requests_per_minute.max(1)).unwrap())
+            (
+                Quota::per_minute(NonZeroU32::new(requests_per_minute.max(1)).unwrap()),
+                format!("{}s (from header)", seconds),
+            )
         } else {
-            // Default conservative rate limit
-            Quota::per_minute(NonZeroU32::new(10).unwrap())
+            // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s...
+            let backoff_seconds = (1u64 << (state.consecutive_429s - 1).min(7)).min(300); // Cap at 5 minutes
+            let requests_per_minute = (60.0 / backoff_seconds as f64).ceil() as u32;
+            (
+                Quota::per_minute(NonZeroU32::new(requests_per_minute.max(1)).unwrap()),
+                format!(
+                    "{}s (exponential backoff, attempt #{})",
+                    backoff_seconds, state.consecutive_429s
+                ),
+            )
         };
 
-        limiters.insert(domain.to_string(), Arc::new(RateLimiter::keyed(quota)));
+        state.limiter = Arc::new(RateLimiter::keyed(quota));
 
-        warn!(
-            "Updated rate limiter for {}: {:?}",
-            domain,
-            retry_after_seconds
-                .map(|s| format!("{}s", s))
-                .unwrap_or("default".to_string())
-        );
+        warn!("Updated rate limiter for {}: {}", domain, wait_description);
     }
 
     /// Extract domain from URL
@@ -113,17 +148,28 @@ impl RateLimitManager {
     }
 
     /// Get or create a rate limiter for a domain
-    pub async fn get_or_create_limiter(&self, domain: &str) -> Arc<DomainRateLimiter> {
-        let mut limiters = self.domain_rate_limiters.lock().await;
-        limiters
+    async fn get_or_create_limiter(&self, domain: &str) -> Arc<DomainRateLimiter> {
+        let now = Instant::now();
+        let mut states = self.domain_states.lock().await;
+        let state = states
             .entry(domain.to_string())
-            .or_insert_with(|| {
-                // Default: 100 requests per minute per domain
-                Arc::new(RateLimiter::keyed(Quota::per_minute(
-                    NonZeroU32::new(100).unwrap(),
-                )))
-            })
-            .clone()
+            .or_insert_with(|| DomainRateLimitState {
+                limiter: Arc::new(RateLimiter::keyed(Quota::per_minute(
+                    NonZeroU32::new(60).unwrap(),
+                ))),
+                consecutive_429s: 0,
+                last_429_time: None,
+            });
+
+        // Reset consecutive 429s if it's been more than 5 minutes since last 429
+        if let Some(last_time) = state.last_429_time {
+            if now.duration_since(last_time) > Duration::from_secs(300) {
+                state.consecutive_429s = 0;
+                state.last_429_time = None;
+            }
+        }
+
+        state.limiter.clone()
     }
 
     /// Check rate limit for a domain
