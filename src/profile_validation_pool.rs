@@ -92,6 +92,16 @@ pub struct ProfileValidatorMetricsSnapshot {
     pub max_retries_exceeded: u64,
 }
 
+/// Context for processing profile validation requests
+struct ProcessContext<'a> {
+    _immediate_tx: &'a flume::Sender<ProfileValidationRequest>,
+    delayed_queue: &'a Arc<Mutex<BinaryHeap<DelayedRequest>>>,
+    database: &'a Arc<RelayDatabase>,
+    filter: &'a Arc<ProfileQualityFilter>,
+    metrics: &'a Arc<ProfileValidatorMetrics>,
+    gossip_client: Option<&'a Client>,
+}
+
 /// Enhanced pool of profile validation workers with retry support
 #[derive(Clone)]
 pub struct ProfileValidationPool {
@@ -153,16 +163,15 @@ impl ProfileValidationPool {
                         result = immediate_rx.recv_async() => {
                             match result {
                                 Ok(req) => {
-                                    Self::process_request(
-                                        req,
-                                        &immediate_tx,
-                                        &delayed_queue,
-                                        &database,
-                                        &filter,
-                                        &metrics,
-                                        gossip_client.as_ref().map(|v| &**v),
-                                        worker_id,
-                                    ).await;
+                                    let ctx = ProcessContext {
+                                        _immediate_tx: &immediate_tx,
+                                        delayed_queue: &delayed_queue,
+                                        database: &database,
+                                        filter: &filter,
+                                        metrics: &metrics,
+                                        gossip_client: gossip_client.as_deref(),
+                                    };
+                                    Self::process_request(req, &ctx, worker_id).await;
                                 }
                                 Err(_) => {
                                     debug!("Worker {} shutting down - channel closed", worker_id);
@@ -174,16 +183,15 @@ impl ProfileValidationPool {
                         // Check for delayed work that's ready
                         _ = Self::wait_for_delayed_ready(&delayed_queue) => {
                             if let Some(req) = Self::pop_ready_delayed(&delayed_queue).await {
-                                Self::process_request(
-                                    req,
-                                    &immediate_tx,
-                                    &delayed_queue,
-                                    &database,
-                                    &filter,
-                                    &metrics,
-                                    gossip_client.as_ref().map(|v| &**v),
-                                    worker_id,
-                                ).await;
+                                let ctx = ProcessContext {
+                                    _immediate_tx: &immediate_tx,
+                                    delayed_queue: &delayed_queue,
+                                    database: &database,
+                                    filter: &filter,
+                                    metrics: &metrics,
+                                    gossip_client: gossip_client.as_deref(),
+                                };
+                                Self::process_request(req, &ctx, worker_id).await;
                             }
                         }
 
@@ -212,25 +220,20 @@ impl ProfileValidationPool {
     /// Process a single validation request
     async fn process_request(
         req: ProfileValidationRequest,
-        _immediate_tx: &flume::Sender<ProfileValidationRequest>,
-        delayed_queue: &Arc<Mutex<BinaryHeap<DelayedRequest>>>,
-        database: &Arc<RelayDatabase>,
-        filter: &Arc<ProfileQualityFilter>,
-        metrics: &Arc<ProfileValidatorMetrics>,
-        gossip_client: Option<&Client>,
+        ctx: &ProcessContext<'_>,
         worker_id: usize,
     ) {
         // Update metrics
-        metrics.queued_operations.fetch_sub(1, AtomicOrdering::Relaxed);
-        metrics.processed_profiles.fetch_add(1, AtomicOrdering::Relaxed);
+        ctx.metrics.queued_operations.fetch_sub(1, AtomicOrdering::Relaxed);
+        ctx.metrics.processed_profiles.fetch_add(1, AtomicOrdering::Relaxed);
 
         // Process the event
-        let result = if let Some(client) = gossip_client {
-            filter
+        let result = if let Some(client) = ctx.gossip_client {
+            ctx.filter
                 .apply_filter_with_gossip(req.event.clone(), req.scope.clone(), client)
                 .await
         } else {
-            filter
+            ctx.filter
                 .apply_filter(req.event.clone(), req.scope.clone())
                 .await
         };
@@ -239,14 +242,14 @@ impl ProfileValidationPool {
         {
             Ok(commands) => {
                 if commands.is_empty() {
-                    metrics.rejected_profiles.fetch_add(1, AtomicOrdering::Relaxed);
+                    ctx.metrics.rejected_profiles.fetch_add(1, AtomicOrdering::Relaxed);
                 } else {
-                    metrics.accepted_profiles.fetch_add(1, AtomicOrdering::Relaxed);
+                    ctx.metrics.accepted_profiles.fetch_add(1, AtomicOrdering::Relaxed);
                 }
 
                 // Save to database
                 for cmd in commands {
-                    if let Err(e) = database.save_store_command(cmd).await {
+                    if let Err(e) = ctx.database.save_store_command(cmd).await {
                         warn!("Worker {} failed to save event: {}", worker_id, e);
                     }
                 }
@@ -254,7 +257,7 @@ impl ProfileValidationPool {
             Err(e) => {
                 // Check if it's a rate limit error
                 if e.to_string().contains("Rate limited") {
-                    metrics.rate_limited_retries.fetch_add(1, AtomicOrdering::Relaxed);
+                    ctx.metrics.rate_limited_retries.fetch_add(1, AtomicOrdering::Relaxed);
 
                     // Check retry count
                     if req.retry_count < 5 {
@@ -270,9 +273,9 @@ impl ProfileValidationPool {
                         };
 
                         // Add to delayed queue
-                        let mut queue = delayed_queue.lock().await;
+                        let mut queue = ctx.delayed_queue.lock().await;
                         queue.push(delayed_req);
-                        metrics.delayed_operations.fetch_add(1, AtomicOrdering::Relaxed);
+                        ctx.metrics.delayed_operations.fetch_add(1, AtomicOrdering::Relaxed);
 
                         debug!(
                             "Worker {} queued rate-limited event for retry #{} at {:?}",
@@ -282,8 +285,8 @@ impl ProfileValidationPool {
                         );
                     } else {
                         // Max retries exceeded
-                        metrics.max_retries_exceeded.fetch_add(1, AtomicOrdering::Relaxed);
-                        metrics.failed_operations.fetch_add(1, AtomicOrdering::Relaxed);
+                        ctx.metrics.max_retries_exceeded.fetch_add(1, AtomicOrdering::Relaxed);
+                        ctx.metrics.failed_operations.fetch_add(1, AtomicOrdering::Relaxed);
                         warn!(
                             "Worker {} giving up on event after {} retries",
                             worker_id, req.retry_count
@@ -291,7 +294,7 @@ impl ProfileValidationPool {
                     }
                 } else {
                     // Other error
-                    metrics.failed_operations.fetch_add(1, AtomicOrdering::Relaxed);
+                    ctx.metrics.failed_operations.fetch_add(1, AtomicOrdering::Relaxed);
                     warn!("Worker {} failed to process event: {}", worker_id, e);
                 }
             }
