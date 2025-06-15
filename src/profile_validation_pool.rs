@@ -373,7 +373,7 @@ impl ProfileValidationPool {
                         ctx.metrics
                             .failed_operations
                             .fetch_add(1, AtomicOrdering::Relaxed);
-                        warn!(
+                        debug!(
                             "Worker {} giving up on event after {} retries",
                             worker_id, req.retry_count
                         );

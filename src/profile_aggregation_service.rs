@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::{interval, sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Configuration for the profile aggregation service
 #[derive(Debug, Clone)]
@@ -252,6 +252,7 @@ impl ProfileAggregationService {
 }
 
 /// Worker that harvests profiles from a single relay
+#[derive(Clone)]
 struct ProfileHarvester {
     relay_url: String,
     config: ProfileAggregationConfig,
@@ -302,7 +303,34 @@ impl ProfileHarvester {
 
         sleep(Duration::from_secs(2)).await;
 
-        // Run backward pagination
+        // Record the timestamp when we start to ensure no gaps
+        let realtime_start = Timestamp::now();
+
+        // Start real-time subscription for new events in the background
+        {
+            let client = client.clone();
+            let validation_pool = self.validation_pool.clone();
+            let relay_url = self.relay_url.clone();
+            let cancellation_token = self.cancellation_token.clone();
+            let filters = self.config.filters.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = Self::run_realtime_subscription(
+                    client,
+                    validation_pool,
+                    relay_url,
+                    realtime_start,
+                    filters,
+                    cancellation_token,
+                )
+                .await
+                {
+                    error!("Real-time subscription error: {}", e);
+                }
+            });
+        }
+
+        // Run backward pagination (the main task)
         self.run_backward_pagination(client).await
     }
 
@@ -491,5 +519,113 @@ impl ProfileHarvester {
         DateTime::<Utc>::from_timestamp(ts.as_u64() as i64, 0)
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
             .unwrap_or_else(|| "Invalid timestamp".to_string())
+    }
+
+    /// Run a real-time subscription for new events
+    async fn run_realtime_subscription(
+        client: Client,
+        validation_pool: Arc<ProfileValidationPool>,
+        relay_url: String,
+        since: Timestamp,
+        filters: Vec<Filter>,
+        cancellation_token: CancellationToken,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        info!(
+            "Starting real-time subscription for {} since {}",
+            relay_url,
+            Self::format_timestamp(since)
+        );
+
+        // Create filters for real-time events
+        let mut realtime_filters = filters;
+        for filter in &mut realtime_filters {
+            filter.since = Some(since);
+        }
+
+        // Subscribe to real-time events
+        let sub_id = client
+            .subscribe(realtime_filters[0].clone(), None)
+            .await?
+            .val;
+
+        // Add any additional filters to the same subscription
+        for filter in realtime_filters.into_iter().skip(1) {
+            client
+                .subscribe_with_id(sub_id.clone(), filter, None)
+                .await?;
+        }
+
+        info!("Real-time subscription {} active for {}", sub_id, relay_url);
+
+        // Handle incoming events
+        let event_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let event_count_clone = event_count.clone();
+
+        client
+            .handle_notifications(|notification| {
+                let cancellation_token = cancellation_token.clone();
+                let sub_id = sub_id.clone();
+                let validation_pool = validation_pool.clone();
+                let relay_url = relay_url.clone();
+                let event_count_clone = event_count_clone.clone();
+
+                async move {
+                    if cancellation_token.is_cancelled() {
+                        return Ok(true); // Exit the loop
+                    }
+
+                    match notification {
+                        RelayPoolNotification::Event {
+                            subscription_id,
+                            event,
+                            ..
+                        } => {
+                            if subscription_id == sub_id {
+                                let count = event_count_clone
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                    + 1;
+
+                                info!(
+                                    "Real-time event #{} received: kind={}, author={}, created_at={}",
+                                    count, event.kind, event.pubkey, event.created_at
+                                );
+
+                                // Submit event to validation pool
+                                if let Err(e) = validation_pool
+                                    .submit_profiles(vec![*event], nostr_lmdb::Scope::Default)
+                                    .await
+                                {
+                                    error!("Failed to submit real-time event: {}", e);
+                                } else if count % 10 == 0 {
+                                    info!(
+                                        "Real-time subscription {}: processed {} events",
+                                        relay_url, count
+                                    );
+                                }
+                            } else {
+                                debug!("Received event for different subscription: {} != {}", subscription_id, sub_id);
+                            }
+                        }
+                        RelayPoolNotification::Message { message, relay_url: msg_relay } => {
+                            debug!("Real-time subscription received message from {}: {:?}", msg_relay, message);
+                        }
+                        _ => {
+                            // Other notification types
+                        }
+                    }
+
+                    Ok(false) // Continue processing
+                }
+            })
+            .await?;
+
+        let final_count = event_count.load(std::sync::atomic::Ordering::Relaxed);
+
+        info!(
+            "Real-time subscription ended for {} (processed {} events)",
+            relay_url, final_count
+        );
+
+        Ok(())
     }
 }
