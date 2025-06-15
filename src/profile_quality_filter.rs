@@ -1,34 +1,96 @@
 //! Profile quality filter implementation
 
 use crate::profile_image_validator::{ImageInfo, ProfileImageValidator};
+use crate::rate_limit_manager::RateLimitManager;
 use async_trait::async_trait;
 use nostr_relay_builder::{Error, EventContext, EventProcessor, RelayDatabase, StoreCommand};
 use nostr_sdk::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::error::Error as StdError;
 use std::fmt;
 use std::sync::Arc;
 use tracing::{debug, warn};
+use url::Url;
+
+/// Error types for profile validation
+#[derive(Debug)]
+pub enum ProfileValidationError {
+    RateLimited { domain: String, retry_after: Option<u64> },
+    InvalidImage(String),
+    InvalidProfile(String),
+    NetworkError(String),
+}
+
+impl fmt::Display for ProfileValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RateLimited { domain, retry_after } => {
+                if let Some(seconds) = retry_after {
+                    write!(f, "Rate limited by {}: retry after {}s", domain, seconds)
+                } else {
+                    write!(f, "Rate limited by {}", domain)
+                }
+            }
+            Self::InvalidImage(msg) => write!(f, "Invalid image: {}", msg),
+            Self::InvalidProfile(msg) => write!(f, "Invalid profile: {}", msg),
+            Self::NetworkError(msg) => write!(f, "Network error: {}", msg),
+        }
+    }
+}
+
+impl StdError for ProfileValidationError {}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct NostrProfileData {
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub about: Option<String>,
+    pub picture: Option<String>,
+    pub banner: Option<String>,
+    pub nip05: Option<String>,
+    pub lud16: Option<String>,
+    pub website: Option<String>,
+    #[serde(default)]
+    pub fields: Option<Vec<serde_json::Value>>,
+}
 
 /// Profile quality filter for validating user profiles
 #[derive(Clone)]
 pub struct ProfileQualityFilter {
     image_validator: Arc<ProfileImageValidator>,
     database: Arc<RelayDatabase>,
+    skip_mostr: bool,
+    skip_fields: bool,
 }
 
 impl fmt::Debug for ProfileQualityFilter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProfileQualityFilter")
             .field("image_validator", &"ProfileImageValidator")
+            .field("skip_mostr", &self.skip_mostr)
+            .field("skip_fields", &self.skip_fields)
             .finish()
     }
 }
 
 impl ProfileQualityFilter {
     pub fn new(database: Arc<RelayDatabase>) -> Self {
+        Self::with_options(database, true, true)
+    }
+
+    pub fn with_options(database: Arc<RelayDatabase>, skip_mostr: bool, skip_fields: bool) -> Self {
+        let rate_limit_manager = Arc::new(RateLimitManager::new());
         Self {
-            // Single image validator - parallelism is now at the profile validation level
-            image_validator: Arc::new(ProfileImageValidator::new(300, 600, true)),
+            // Single image validator with shared rate limiter
+            image_validator: Arc::new(ProfileImageValidator::with_rate_limiter(
+                300,  // min_width
+                600,  // min_height
+                true, // allow_animated
+                rate_limit_manager,
+            )),
             database,
+            skip_mostr,
+            skip_fields,
         }
     }
 
@@ -75,6 +137,7 @@ impl ProfileQualityFilter {
     ) -> Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
         self.apply_filter_internal(event, subdomain, Some(gossip_client))
             .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 
     /// Apply the quality filter to an event (without outbox verification)
@@ -83,7 +146,9 @@ impl ProfileQualityFilter {
         event: Event,
         subdomain: nostr_lmdb::Scope,
     ) -> Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
-        self.apply_filter_internal(event, subdomain, None).await
+        self.apply_filter_internal(event, subdomain, None)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 
     /// Internal filter application logic
@@ -92,13 +157,14 @@ impl ProfileQualityFilter {
         event: Event,
         subdomain: nostr_lmdb::Scope,
         gossip_client: Option<&Client>,
-    ) -> Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Vec<StoreCommand>, ProfileValidationError> {
         // Handle relay list events (kind 10002) - only accept if the author has metadata
         if event.kind == Kind::Custom(10002) {
             // Check if this pubkey has existing metadata in the database
             if self
                 .check_existing_metadata(event.pubkey, &subdomain)
-                .await?
+                .await
+                .map_err(|e| ProfileValidationError::NetworkError(e.to_string()))?
             {
                 return Ok(vec![StoreCommand::SaveSignedEvent(
                     Box::new(event),
@@ -119,51 +185,82 @@ impl ProfileQualityFilter {
         let raw_tags = serde_json::to_string(&event.tags).unwrap_or_default();
         if raw_tags.contains("\"proxy\"") || raw_tags.contains("\"Mostr\"") {
             debug!("Skipping bridged/Mostr account");
-            return self.get_delete_if_exists(event.pubkey, &subdomain).await;
+            return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
+                Ok(cmds) => Ok(cmds),
+                Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+            };
         }
 
         // Parse metadata
-        let metadata: serde_json::Value = match serde_json::from_str(&event.content) {
+        let profile_data: NostrProfileData = match serde_json::from_str(&event.content) {
             Ok(m) => m,
             Err(e) => {
                 debug!("Invalid metadata JSON: {}", e);
-                return self.get_delete_if_exists(event.pubkey, &subdomain).await;
+                return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
+                    Ok(cmds) => Ok(cmds),
+                    Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+                };
             }
         };
 
         // Check for mostr.pub NIP-05
-        if let Some(nip05) = metadata.get("nip05").and_then(|v| v.as_str()) {
-            if nip05.contains("mostr.pub") || nip05.contains("mostr-pub") {
-                debug!("Skipping mostr.pub account");
-                return self.get_delete_if_exists(event.pubkey, &subdomain).await;
+        if self.skip_mostr {
+            if let Some(nip05) = &profile_data.nip05 {
+                if nip05.contains("mostr.pub") || nip05.contains("mostr-pub") {
+                    debug!("Skipping mostr.pub account");
+                    return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
+                Ok(cmds) => Ok(cmds),
+                Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+            };
+                }
             }
         }
 
         // Check for "fields" array (common in ActivityPub)
-        if metadata.get("fields").is_some() {
+        if self.skip_fields && profile_data.fields.is_some() {
             debug!("Skipping account with 'fields' (likely bridged)");
-            return self.get_delete_if_exists(event.pubkey, &subdomain).await;
+            return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
+                Ok(cmds) => Ok(cmds),
+                Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+            };
         }
 
         // Check for name
-        let display_name = metadata.get("display_name").and_then(|v| v.as_str());
-        let name = metadata.get("name").and_then(|v| v.as_str());
-        if display_name.is_none() && name.is_none() {
+        if profile_data.display_name.is_none() && profile_data.name.is_none() {
             debug!("Rejecting profile - no name");
-            return self.get_delete_if_exists(event.pubkey, &subdomain).await;
+            return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
+                Ok(cmds) => Ok(cmds),
+                Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+            };
         }
 
         // Check for about field
-        let about = metadata.get("about").and_then(|v| v.as_str());
-        if about.map(|s| s.trim().is_empty()).unwrap_or(true) {
+        if profile_data.about.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
             debug!("Rejecting profile - no about");
-            return self.get_delete_if_exists(event.pubkey, &subdomain).await;
+            return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
+                Ok(cmds) => Ok(cmds),
+                Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+            };
+        }
+
+        // Pre-check rate limits for picture
+        if let Some(picture) = &profile_data.picture {
+            if let Ok(true) = self.image_validator.is_domain_rate_limited(picture).await {
+                let domain = self.extract_domain(picture);
+                return Err(ProfileValidationError::RateLimited {
+                    domain,
+                    retry_after: None,
+                });
+            }
         }
 
         // Verify profile picture
-        let Some(image_info) = self.verify_profile_picture(&metadata).await else {
+        let Some(image_info) = self.verify_profile_picture(&profile_data).await else {
             debug!("Rejecting profile - no picture");
-            return self.get_delete_if_exists(event.pubkey, &subdomain).await;
+            return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
+                Ok(cmds) => Ok(cmds),
+                Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+            };
         };
 
         // Use gossip client to verify user has published events and fetch relay preferences
@@ -218,7 +315,10 @@ impl ProfileQualityFilter {
                             "Rejecting profile {} - no TextNote found via outbox",
                             event.pubkey.to_hex()[..8].to_string() + "..."
                         );
-                        return self.get_delete_if_exists(event.pubkey, &subdomain).await;
+                        return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
+                Ok(cmds) => Ok(cmds),
+                Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+            };
                     }
 
                     // Profile passed - prepare store commands
@@ -241,7 +341,7 @@ impl ProfileQualityFilter {
                     }
 
                     debug!(
-                        "✅ Profile {} passed all checks ({}x{} image, has published TextNote)",
+                        "Profile {} verified: {}x{} image, has text note",
                         event.pubkey.to_hex()[..8].to_string() + "...",
                         image_info.width,
                         image_info.height
@@ -256,7 +356,10 @@ impl ProfileQualityFilter {
                         e
                     );
                     // Treat verification errors as no activity to err on the side of caution
-                    self.get_delete_if_exists(event.pubkey, &subdomain).await
+                    match self.get_delete_if_exists(event.pubkey, &subdomain).await {
+                        Ok(cmds) => Ok(cmds),
+                        Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+                    }
                 }
             }
         } else {
@@ -265,13 +368,16 @@ impl ProfileQualityFilter {
                 "Rejecting profile {} - no gossip client available for verification",
                 event.pubkey.to_hex()[..8].to_string() + "..."
             );
-            self.get_delete_if_exists(event.pubkey, &subdomain).await
+            match self.get_delete_if_exists(event.pubkey, &subdomain).await {
+                Ok(cmds) => Ok(cmds),
+                Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+            }
         }
     }
 
     /// Verify profile picture and return ImageInfo if it passes validation
-    async fn verify_profile_picture(&self, metadata: &serde_json::Value) -> Option<ImageInfo> {
-        let picture = metadata.get("picture").and_then(|v| v.as_str())?;
+    async fn verify_profile_picture(&self, profile_data: &NostrProfileData) -> Option<ImageInfo> {
+        let picture = profile_data.picture.as_ref()?;
 
         if picture.trim().is_empty() {
             debug!("Rejecting profile - empty picture URL");
@@ -289,6 +395,13 @@ impl ProfileQualityFilter {
                 None
             }
         }
+    }
+
+    fn extract_domain(&self, url: &str) -> String {
+        url.parse::<Url>()
+            .ok()
+            .and_then(|u| u.domain().map(String::from))
+            .unwrap_or_else(|| "unknown".to_string())
     }
 
     /// Fetch user events (TextNote, relay list, DM relays) using separate queries

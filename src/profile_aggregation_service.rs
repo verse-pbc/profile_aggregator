@@ -147,7 +147,7 @@ impl ProfileAggregationService {
     /// Run the aggregation service
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         info!(
-            "🚀 Starting profile aggregation service for {} relays with {} worker threads",
+            "Starting profile aggregation service: {} relays, {} workers",
             self.config.relay_urls.len(),
             self.config.worker_threads,
         );
@@ -315,14 +315,14 @@ impl ProfileHarvester {
                 if info.window_complete {
                     let new_window_start = info.window_start;
                     info!(
-                        "🔄 Starting new window for {} from {}",
+                        "Starting new window for {} from {}",
                         self.relay_url,
                         Self::format_timestamp(new_window_start)
                     );
                     (new_window_start, Timestamp::now())
                 } else {
                     info!(
-                        "▶️  Continuing window for {} with until={}",
+                        "Continuing window for {} until {}",
                         self.relay_url,
                         Self::format_timestamp(info.last_until_timestamp)
                     );
@@ -330,7 +330,7 @@ impl ProfileHarvester {
                 }
             } else {
                 let now = Timestamp::now();
-                info!("🏁 Starting first window for {} from now", self.relay_url);
+                info!("Starting first window for {}", self.relay_url);
                 (now, now)
             }
         };
@@ -353,7 +353,7 @@ impl ProfileHarvester {
             }
 
             info!(
-                "📄 Fetching page #{} from {} with until={}",
+                "Fetching page {} from {} (until: {})",
                 page_number,
                 self.relay_url,
                 Self::format_timestamp(last_until)
@@ -411,7 +411,7 @@ impl ProfileHarvester {
                 };
 
                 info!(
-                    "📦 Submitted {} events from page #{} to processing pool (total: {}) from {}",
+                    "Submitted {} events from page {} (total: {}) - {}",
                     event_count, page_number, total_events, self.relay_url
                 );
 
@@ -421,7 +421,7 @@ impl ProfileHarvester {
                     // Subtract one second to avoid getting stuck
                     last_until = Timestamp::from(oldest_timestamp.as_u64().saturating_sub(1));
                     warn!(
-                        "⚠️  Page returned same timestamp as last_until ({}), subtracting 1 second to avoid infinite loop",
+                        "Page timestamp unchanged ({}), adjusting to prevent loop",
                         oldest_timestamp
                     );
                 } else {
@@ -435,7 +435,7 @@ impl ProfileHarvester {
             } else {
                 consecutive_empty_pages += 1;
                 if consecutive_empty_pages >= 3 {
-                    info!("✅ Window complete for {}", self.relay_url);
+                    info!("Window complete for {}", self.relay_url);
 
                     let mut state_guard = self.state.write().await;
                     if let Some(info) = state_guard.relay_states.get_mut(&self.relay_url) {

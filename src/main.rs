@@ -1,14 +1,10 @@
-mod profile_aggregation_service;
-mod profile_image_validator;
-mod profile_quality_filter;
-mod profile_validation_pool;
-
 use anyhow::Result;
 use axum::{routing::get, Router};
 use nostr_relay_builder::{CryptoWorker, RelayBuilder, RelayConfig, RelayDatabase, RelayInfo};
 use nostr_sdk::prelude::*;
-use profile_aggregation_service::{ProfileAggregationConfig, ProfileAggregationService};
-use profile_quality_filter::ProfileQualityFilter;
+use profile_aggregator::{
+    ProfileAggregationConfig, ProfileAggregationService, ProfileQualityFilter,
+};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -141,42 +137,22 @@ async fn main() -> Result<()> {
         }
     });
 
-    println!("\n🚀 Profile Aggregator Relay Starting...");
-    println!("📡 WebSocket endpoint: ws://{}", addr);
-    println!("🌐 Web interface: http://{}", addr);
-    println!("\n🏛️ Architecture: Service-based");
-    println!("  • Relay runs normally on WebSocket");
-    println!("  • Aggregation service fetches from external relays");
-    println!("  • Both share the same database");
-    println!("  • Events broadcast to all WebSocket clients");
-    println!("\n🔍 Fetching High-Quality User Profiles (Kind 0)");
-    println!("\nAggregating profiles from:");
-    for url in &discovery_relay_urls {
-        println!("  - {}", url);
-    }
-    println!("\nFiltering Requirements:");
-    println!("  ✓ Must have display_name OR name");
-    println!("  ✓ Must have about/bio field (non-empty)");
-    println!("  ✓ Must have picture with standards:");
-    println!("    • Valid HTTP/HTTPS URL or data:image URL");
-    println!("    • Minimum dimensions: 300x600 pixels");
-    println!("    • Not favicon.ico, rss-to-nostr, default-avatar, or placeholder");
-    println!("  ✓ Must have published TextNote (outbox verification):");
-    println!("    • Uses gossip model to find user's outbox relays");
-    println!("    • Fetches kinds 1, 10002, 10050 in single request");
-    println!("    • Saves relay preferences only if TextNote found");
-    println!("    • Discovery via relay.nos.social");
-    println!("  ✗ Skip Mastodon/ActivityPub bridges");
-    println!("  ✗ Skip Mostr accounts");
-    println!("  ✗ Skip profiles with 'fields' array");
-    println!("\n⚙️  Configuration:");
-    println!("  • Page size: {} events", page_size);
-    println!("  • Worker threads: {}", worker_threads);
-    println!("  • Initial backoff: {}s", initial_backoff_secs);
-    println!("  • Max backoff: {}s", max_backoff_secs);
-    println!("\n📁 Storage:");
-    println!("  • Database: {}", database_path);
-    println!("  • State file: {}", state_file);
+    println!("\nProfile Aggregator starting");
+    println!("WebSocket: ws://{}", addr);
+    println!("\nFetching user profiles (kind 0)");
+    println!("\nDiscovery relay: {}", discovery_relay_urls.join(", "));
+    println!("\nProfile requirements:");
+    println!("- Name: display_name or name field");
+    println!("- Bio: non-empty about field");
+    println!("- Picture: valid URL, min 300x600px");
+    println!("- Verified: published text note via outbox relays");
+    println!("- Excludes: bridges, mostr accounts, profiles with fields array");
+    println!("\nConfiguration:");
+    println!("- Page size: {} events", page_size);
+    println!("- Workers: {} threads", worker_threads);
+    println!("- Backoff: {}s-{}s", initial_backoff_secs, max_backoff_secs);
+    println!("- Database: {}", database_path);
+    println!("- State: {}", state_file);
 
     // Handle shutdown signal
     let shutdown_token = cancellation_token.clone();

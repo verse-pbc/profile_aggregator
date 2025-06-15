@@ -1959,7 +1959,6 @@ checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 [[package]]
 name = "nostr"
 version = "0.41.0"
-source = "git+https://github.com/verse-pbc/nostr#abeea1e9c82c441541c4544ed877f217ad9f0c44"
 dependencies = [
  "aes",
  "base64",
@@ -1988,7 +1987,6 @@ dependencies = [
 [[package]]
 name = "nostr-database"
 version = "0.41.0"
-source = "git+https://github.com/verse-pbc/nostr#abeea1e9c82c441541c4544ed877f217ad9f0c44"
 dependencies = [
  "flatbuffers",
  "lru",
@@ -1999,7 +1997,6 @@ dependencies = [
 [[package]]
 name = "nostr-lmdb"
 version = "0.41.0"
-source = "git+https://github.com/verse-pbc/nostr#abeea1e9c82c441541c4544ed877f217ad9f0c44"
 dependencies = [
  "async-utility",
  "flatbuffers",
@@ -2014,7 +2011,6 @@ dependencies = [
 [[package]]
 name = "nostr-relay-pool"
 version = "0.41.0"
-source = "git+https://github.com/verse-pbc/nostr#abeea1e9c82c441541c4544ed877f217ad9f0c44"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -2031,7 +2027,6 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.41.0"
-source = "git+https://github.com/verse-pbc/nostr#abeea1e9c82c441541c4544ed877f217ad9f0c44"
 dependencies = [
  "async-utility",
  "nostr",
@@ -2044,7 +2039,6 @@ dependencies = [
 [[package]]
 name = "nostr_relay_builder"
 version = "0.1.0"
-source = "git+https://github.com/verse-pbc/groups_relay?branch=main#5b3782c9ab48daaaaef2257e3925ccc980ba42e4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4021,7 +4015,6 @@ dependencies = [
 [[package]]
 name = "websocket_builder"
 version = "0.1.0"
-source = "git+https://github.com/verse-pbc/groups_relay?branch=main#5b3782c9ab48daaaaef2257e3925ccc980ba42e4"
 dependencies = [
  "anyhow",
  "async-trait",

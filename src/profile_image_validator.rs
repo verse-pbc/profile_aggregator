@@ -1,17 +1,12 @@
-use governor::clock::DefaultClock;
-use governor::state::keyed::DefaultKeyedStateStore;
-use governor::{Quota, RateLimiter};
+use crate::rate_limit_manager::RateLimitManager;
 use image::{ImageDecoder, ImageFormat};
 use reqwest::{Client, Response, Url};
-use std::collections::HashMap;
 use std::error::Error;
 use std::io::Cursor;
-use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use svgtypes::ViewBox;
-use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 #[derive(Debug)]
@@ -22,19 +17,30 @@ pub struct ImageInfo {
     pub is_animated: bool,
 }
 
-type DomainRateLimiter = RateLimiter<String, DefaultKeyedStateStore<String>, DefaultClock>;
-
 pub struct ProfileImageValidator {
     client: Client,
     min_width: u32,
     min_height: u32,
     allow_animated: bool,
-    // Rate limiters per domain
-    domain_rate_limiters: Arc<Mutex<HashMap<String, Arc<DomainRateLimiter>>>>,
+    rate_limit_manager: Arc<RateLimitManager>,
 }
 
 impl ProfileImageValidator {
     pub fn new(min_width: u32, min_height: u32, allow_animated: bool) -> Self {
+        Self::with_rate_limiter(
+            min_width,
+            min_height,
+            allow_animated,
+            Arc::new(RateLimitManager::new()),
+        )
+    }
+
+    pub fn with_rate_limiter(
+        min_width: u32,
+        min_height: u32,
+        allow_animated: bool,
+        rate_limit_manager: Arc<RateLimitManager>,
+    ) -> Self {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(10))
@@ -44,8 +50,18 @@ impl ProfileImageValidator {
             min_width,
             min_height,
             allow_animated,
-            domain_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
+            rate_limit_manager,
         }
+    }
+
+    /// Check if a URL's domain is currently rate limited
+    pub async fn is_domain_rate_limited(&self, url: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        self.rate_limit_manager.is_domain_rate_limited(url).await
+    }
+
+    /// Get the wait time until a domain is no longer rate limited
+    pub async fn get_rate_limit_wait_time(&self, url: &str) -> Result<Option<Duration>, Box<dyn Error + Send + Sync>> {
+        self.rate_limit_manager.get_rate_limit_wait_time(url).await
     }
 
     pub async fn check(
@@ -110,32 +126,13 @@ impl ProfileImageValidator {
             .ok_or("Invalid URL: no domain")?
             .to_string();
 
-        // Get or create rate limiter for this domain
-        let rate_limiter = {
-            let mut limiters = self.domain_rate_limiters.lock().await;
-            limiters
-                .entry(domain.clone())
-                .or_insert_with(|| {
-                    // Default: 100 requests per minute per domain
-                    Arc::new(RateLimiter::keyed(Quota::per_minute(
-                        NonZeroU32::new(100).unwrap(),
-                    )))
-                })
-                .clone()
-        };
-
-        // Check rate limit with jitter to avoid thundering herd
-        match rate_limiter.check_key(&domain) {
-            Ok(_) => {} // Proceed with request
-            Err(not_until) => {
-                let wait_time =
-                    not_until.wait_time_from(governor::clock::Clock::now(&DefaultClock::default()));
-                debug!(
-                    "Rate limited for domain {}: waiting {:?}",
-                    domain, wait_time
-                );
-                return Err(format!("Rate limited for domain {}", domain).into());
-            }
+        // Check rate limit
+        if let Err(wait_time) = self.rate_limit_manager.check_rate_limit(&domain).await {
+            debug!(
+                "Rate limited for domain {}: waiting {:?}",
+                domain, wait_time
+            );
+            return Err(format!("Rate limited for domain {}", domain).into());
         }
 
         let response = self.client.get(url).send().await?;
@@ -217,12 +214,6 @@ impl ProfileImageValidator {
     }
 
     async fn update_rate_limiter_from_headers(&self, domain: &str, response: &Response) {
-        // Common rate limit headers:
-        // X-RateLimit-Limit: requests per window
-        // X-RateLimit-Remaining: requests remaining
-        // X-RateLimit-Reset: timestamp when limit resets
-        // Retry-After: seconds to wait (for 429 responses)
-
         let headers = response.headers();
 
         // Try to get rate limit from headers
@@ -230,49 +221,7 @@ impl ProfileImageValidator {
             if let Ok(retry_str) = retry_after.to_str() {
                 // Retry-After can be seconds or HTTP date
                 if let Ok(seconds) = retry_str.parse::<u64>() {
-                    // Update rate limiter to be more conservative
-                    let mut limiters = self.domain_rate_limiters.lock().await;
-
-                    // Set a very low rate based on retry-after
-                    // If retry-after is 60 seconds, allow 1 request per 60 seconds
-                    let requests_per_minute = (60.0 / seconds.max(1) as f64).ceil() as u32;
-                    let quota =
-                        Quota::per_minute(NonZeroU32::new(requests_per_minute.max(1)).unwrap());
-
-                    limiters.insert(domain.to_string(), Arc::new(RateLimiter::keyed(quota)));
-
-                    warn!(
-                        "Updated rate limiter for {}: {} requests/minute based on retry-after: {}s",
-                        domain, requests_per_minute, seconds
-                    );
-                }
-            }
-        } else if let (Some(limit), Some(window)) = (
-            headers.get("x-ratelimit-limit"),
-            headers.get("x-ratelimit-window"),
-        ) {
-            // Some APIs provide limit and window separately
-            if let (Ok(limit_str), Ok(window_str)) = (limit.to_str(), window.to_str()) {
-                if let (Ok(limit_num), Ok(window_secs)) =
-                    (limit_str.parse::<u32>(), window_str.parse::<u64>())
-                {
-                    let mut limiters = self.domain_rate_limiters.lock().await;
-
-                    let quota = if window_secs <= 60 {
-                        Quota::per_minute(NonZeroU32::new(limit_num.max(1)).unwrap())
-                    } else {
-                        Quota::per_hour(
-                            NonZeroU32::new((limit_num * 3600 / window_secs as u32).max(1))
-                                .unwrap(),
-                        )
-                    };
-
-                    limiters.insert(domain.to_string(), Arc::new(RateLimiter::keyed(quota)));
-
-                    warn!(
-                        "Updated rate limiter for {} based on headers: {} requests per {} seconds",
-                        domain, limit_num, window_secs
-                    );
+                    self.rate_limit_manager.update_rate_limiter(domain, Some(seconds)).await;
                 }
             }
         }

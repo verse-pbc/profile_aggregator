@@ -2,52 +2,112 @@ use crate::profile_quality_filter::ProfileQualityFilter;
 use nostr_lmdb::Scope;
 use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-/// Request to validate a profile
-#[derive(Debug)]
+/// Request to validate a profile with retry metadata
+#[derive(Debug, Clone)]
 struct ProfileValidationRequest {
     event: Event,
     scope: Scope,
+    retry_count: u8,
+    earliest_retry_time: Option<Instant>,
+}
+
+impl ProfileValidationRequest {
+    fn new(event: Event, scope: Scope) -> Self {
+        Self {
+            event,
+            scope,
+            retry_count: 0,
+            earliest_retry_time: None,
+        }
+    }
+
+    fn with_retry(mut self, retry_time: Instant) -> Self {
+        self.retry_count += 1;
+        self.earliest_retry_time = Some(retry_time);
+        self
+    }
+}
+
+/// Wrapper for delayed requests in the priority queue
+#[derive(Debug, Clone)]
+struct DelayedRequest {
+    earliest_retry_time: Instant,
+    request: ProfileValidationRequest,
+}
+
+impl Eq for DelayedRequest {}
+
+impl PartialEq for DelayedRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.earliest_retry_time == other.earliest_retry_time
+    }
+}
+
+impl Ord for DelayedRequest {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse order for min-heap (earliest time first)
+        other.earliest_retry_time.cmp(&self.earliest_retry_time)
+    }
+}
+
+impl PartialOrd for DelayedRequest {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Metrics for monitoring the profile validation pool
 #[derive(Default, Debug)]
 struct ProfileValidatorMetrics {
     queued_operations: AtomicUsize,
+    delayed_operations: AtomicUsize,
     processed_profiles: AtomicU64,
     accepted_profiles: AtomicU64,
     rejected_profiles: AtomicU64,
     failed_operations: AtomicU64,
+    rate_limited_retries: AtomicU64,
+    max_retries_exceeded: AtomicU64,
 }
 
 /// Snapshot of metrics for reporting
 #[derive(Debug, Clone)]
 pub struct ProfileValidatorMetricsSnapshot {
     pub queued_operations: usize,
+    pub delayed_operations: usize,
     pub processed_profiles: u64,
     pub accepted_profiles: u64,
     pub rejected_profiles: u64,
     pub failed_operations: u64,
+    pub rate_limited_retries: u64,
+    pub max_retries_exceeded: u64,
 }
 
-/// Pool of profile validation workers for parallel processing
+/// Enhanced pool of profile validation workers with retry support
 #[derive(Clone)]
 pub struct ProfileValidationPool {
-    // Channel for sending event requests (flume supports multi-consumer)
-    tx: flume::Sender<ProfileValidationRequest>,
+    // Channel for immediate processing (flume supports multi-consumer)
+    immediate_tx: flume::Sender<ProfileValidationRequest>,
+    // Shared priority queue for delayed requests
+    #[allow(dead_code)]
+    delayed_queue: Arc<Mutex<BinaryHeap<DelayedRequest>>>,
     // Metrics for monitoring
     metrics: Arc<ProfileValidatorMetrics>,
-    // Handles to worker tasks (kept to ensure they're not dropped)
+    // Handles to worker tasks
     _handles: Arc<Vec<JoinHandle<()>>>,
 }
 
 impl ProfileValidationPool {
-    /// Create a new profile validation pool with the specified number of workers
+    /// Create a new enhanced profile validation pool
     pub fn new(
         worker_count: usize,
         filter: Arc<ProfileQualityFilter>,
@@ -59,79 +119,77 @@ impl ProfileValidationPool {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(worker_count * 20);
+        let (immediate_tx, immediate_rx) = flume::bounded(queue_size);
+        let delayed_queue = Arc::new(Mutex::new(BinaryHeap::new()));
+        let metrics = Arc::new(ProfileValidatorMetrics::default());
+        let mut handles = Vec::new();
 
         info!(
             "Starting profile validation pool with {} workers, queue size {}",
             worker_count, queue_size
         );
 
-        // Create a bounded channel for backpressure
-        let (tx, rx) = flume::bounded::<ProfileValidationRequest>(queue_size);
-        let metrics = Arc::new(ProfileValidatorMetrics::default());
-        let mut handles = Vec::new();
-
-        // Spawn worker tasks - they all share the same receiver
+        // Spawn worker tasks
         for worker_id in 0..worker_count {
-            let rx = rx.clone();
-            let filter = filter.clone();
+            let immediate_rx = immediate_rx.clone();
+            let immediate_tx = immediate_tx.clone();
+            let delayed_queue = delayed_queue.clone();
             let database = database.clone();
+            let filter = filter.clone();
+            let metrics = metrics.clone();
             let cancel = cancellation_token.clone();
-            let metrics = Arc::clone(&metrics);
-            let gossip_client = gossip_client.clone();
+            let gossip_client = Some(gossip_client.clone());
 
             let handle = tokio::spawn(async move {
                 debug!("Profile validator worker {} started", worker_id);
 
                 loop {
-                    // Check cancellation
                     if cancel.is_cancelled() {
                         break;
                     }
 
-                    // Try to get work from the shared queue
-                    match rx.recv_async().await {
-                        Ok(req) => {
-                            // Update metrics
-                            metrics.queued_operations.fetch_sub(1, Ordering::Relaxed);
-                            metrics.processed_profiles.fetch_add(1, Ordering::Relaxed);
-
-                            // Process the event with gossip client
-                            match filter
-                                .apply_filter_with_gossip(
-                                    req.event.clone(),
-                                    req.scope.clone(),
-                                    gossip_client.as_ref(),
-                                )
-                                .await
-                            {
-                                Ok(commands) => {
-                                    // Successfully processed
-                                    if commands.is_empty() {
-                                        metrics.rejected_profiles.fetch_add(1, Ordering::Relaxed);
-                                    } else {
-                                        metrics.accepted_profiles.fetch_add(1, Ordering::Relaxed);
-                                    }
-
-                                    // Save to database
-                                    for cmd in commands {
-                                        if let Err(e) = database.save_store_command(cmd).await {
-                                            warn!(
-                                                "Worker {} failed to save event: {}",
-                                                worker_id, e
-                                            );
-                                        }
-                                    }
+                    tokio::select! {
+                        // Check for immediate work
+                        result = immediate_rx.recv_async() => {
+                            match result {
+                                Ok(req) => {
+                                    Self::process_request(
+                                        req,
+                                        &immediate_tx,
+                                        &delayed_queue,
+                                        &database,
+                                        &filter,
+                                        &metrics,
+                                        gossip_client.as_ref().map(|v| &**v),
+                                        worker_id,
+                                    ).await;
                                 }
-                                Err(e) => {
-                                    // Processing failed
-                                    metrics.failed_operations.fetch_add(1, Ordering::Relaxed);
-                                    warn!("Worker {} failed to process event: {}", worker_id, e);
+                                Err(_) => {
+                                    debug!("Worker {} shutting down - channel closed", worker_id);
+                                    break;
                                 }
                             }
                         }
-                        Err(_) => {
-                            // Channel closed, exit
-                            debug!("Worker {} shutting down - channel closed", worker_id);
+
+                        // Check for delayed work that's ready
+                        _ = Self::wait_for_delayed_ready(&delayed_queue) => {
+                            if let Some(req) = Self::pop_ready_delayed(&delayed_queue).await {
+                                Self::process_request(
+                                    req,
+                                    &immediate_tx,
+                                    &delayed_queue,
+                                    &database,
+                                    &filter,
+                                    &metrics,
+                                    gossip_client.as_ref().map(|v| &**v),
+                                    worker_id,
+                                ).await;
+                            }
+                        }
+
+                        // Cancellation check
+                        _ = cancel.cancelled() => {
+                            debug!("Worker {} received cancellation signal", worker_id);
                             break;
                         }
                     }
@@ -144,14 +202,153 @@ impl ProfileValidationPool {
         }
 
         Self {
-            tx,
+            immediate_tx,
+            delayed_queue,
             metrics,
             _handles: Arc::new(handles),
         }
     }
 
-    /// Submit profiles for processing without waiting for responses
-    /// This is fire-and-forget - workers will save directly to database
+    /// Process a single validation request
+    async fn process_request(
+        req: ProfileValidationRequest,
+        _immediate_tx: &flume::Sender<ProfileValidationRequest>,
+        delayed_queue: &Arc<Mutex<BinaryHeap<DelayedRequest>>>,
+        database: &Arc<RelayDatabase>,
+        filter: &Arc<ProfileQualityFilter>,
+        metrics: &Arc<ProfileValidatorMetrics>,
+        gossip_client: Option<&Client>,
+        worker_id: usize,
+    ) {
+        // Update metrics
+        metrics.queued_operations.fetch_sub(1, AtomicOrdering::Relaxed);
+        metrics.processed_profiles.fetch_add(1, AtomicOrdering::Relaxed);
+
+        // Process the event
+        let result = if let Some(client) = gossip_client {
+            filter
+                .apply_filter_with_gossip(req.event.clone(), req.scope.clone(), client)
+                .await
+        } else {
+            filter
+                .apply_filter(req.event.clone(), req.scope.clone())
+                .await
+        };
+        
+        match result
+        {
+            Ok(commands) => {
+                if commands.is_empty() {
+                    metrics.rejected_profiles.fetch_add(1, AtomicOrdering::Relaxed);
+                } else {
+                    metrics.accepted_profiles.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+
+                // Save to database
+                for cmd in commands {
+                    if let Err(e) = database.save_store_command(cmd).await {
+                        warn!("Worker {} failed to save event: {}", worker_id, e);
+                    }
+                }
+            }
+            Err(e) => {
+                // Check if it's a rate limit error
+                if e.to_string().contains("Rate limited") {
+                    metrics.rate_limited_retries.fetch_add(1, AtomicOrdering::Relaxed);
+
+                    // Check retry count
+                    if req.retry_count < 5 {
+                        // Parse retry delay from error (or use default)
+                        let retry_delay = Self::parse_retry_delay(&e.to_string())
+                            .unwrap_or(Duration::from_secs(60));
+
+                        let retry_time = Instant::now() + retry_delay;
+                        let retry_count = req.retry_count;
+                        let delayed_req = DelayedRequest {
+                            earliest_retry_time: retry_time,
+                            request: req.with_retry(retry_time),
+                        };
+
+                        // Add to delayed queue
+                        let mut queue = delayed_queue.lock().await;
+                        queue.push(delayed_req);
+                        metrics.delayed_operations.fetch_add(1, AtomicOrdering::Relaxed);
+
+                        debug!(
+                            "Worker {} queued rate-limited event for retry #{} at {:?}",
+                            worker_id,
+                            retry_count + 1,
+                            retry_time
+                        );
+                    } else {
+                        // Max retries exceeded
+                        metrics.max_retries_exceeded.fetch_add(1, AtomicOrdering::Relaxed);
+                        metrics.failed_operations.fetch_add(1, AtomicOrdering::Relaxed);
+                        warn!(
+                            "Worker {} giving up on event after {} retries",
+                            worker_id, req.retry_count
+                        );
+                    }
+                } else {
+                    // Other error
+                    metrics.failed_operations.fetch_add(1, AtomicOrdering::Relaxed);
+                    warn!("Worker {} failed to process event: {}", worker_id, e);
+                }
+            }
+        }
+    }
+
+    /// Wait until the next delayed item is ready
+    async fn wait_for_delayed_ready(delayed_queue: &Arc<Mutex<BinaryHeap<DelayedRequest>>>) {
+        let sleep_duration = {
+            let queue = delayed_queue.lock().await;
+            queue
+                .peek()
+                .map(|item| {
+                    let now = Instant::now();
+                    if item.earliest_retry_time > now {
+                        item.earliest_retry_time - now
+                    } else {
+                        Duration::from_millis(0)
+                    }
+                })
+                .unwrap_or(Duration::from_secs(3600)) // Sleep 1 hour if queue is empty
+        };
+
+        tokio::time::sleep(sleep_duration).await;
+    }
+
+    /// Pop a ready item from the delayed queue
+    async fn pop_ready_delayed(
+        delayed_queue: &Arc<Mutex<BinaryHeap<DelayedRequest>>>,
+    ) -> Option<ProfileValidationRequest> {
+        let mut queue = delayed_queue.lock().await;
+        
+        if let Some(item) = queue.peek() {
+            if item.earliest_retry_time <= Instant::now() {
+                let delayed_req = queue.pop().unwrap();
+                return Some(delayed_req.request);
+            }
+        }
+        
+        None
+    }
+
+    /// Parse retry delay from error message
+    fn parse_retry_delay(error_msg: &str) -> Option<Duration> {
+        // Look for patterns like "retry after 60s" or "wait 120 seconds"
+        if let Some(pos) = error_msg.find("retry after ") {
+            let after = &error_msg[pos + 12..];
+            if let Some(end) = after.find('s') {
+                if let Ok(seconds) = after[..end].trim().parse::<u64>() {
+                    return Some(Duration::from_secs(seconds));
+                }
+            }
+        }
+        None
+    }
+
+    /// Submit profiles for processing
     pub async fn submit_profiles(
         &self,
         events: Vec<Event>,
@@ -161,15 +358,13 @@ impl ProfileValidationPool {
             // Update metrics
             self.metrics
                 .queued_operations
-                .fetch_add(1, Ordering::Relaxed);
+                .fetch_add(1, AtomicOrdering::Relaxed);
 
-            // Send the request to the worker pool
-            let request = ProfileValidationRequest {
-                event,
-                scope: scope.clone(),
-            };
+            // Create new request
+            let request = ProfileValidationRequest::new(event, scope.clone());
 
-            self.tx
+            // Send to immediate queue
+            self.immediate_tx
                 .send_async(request)
                 .await
                 .map_err(|_| "Profile validation queue full")?;
@@ -178,20 +373,23 @@ impl ProfileValidationPool {
         Ok(())
     }
 
-    /// Get current metrics
+    /// Get current metrics snapshot
     pub fn metrics(&self) -> ProfileValidatorMetricsSnapshot {
-        ProfileValidatorMetricsSnapshot {
-            queued_operations: self.metrics.queued_operations.load(Ordering::Relaxed),
-            processed_profiles: self.metrics.processed_profiles.load(Ordering::Relaxed),
-            accepted_profiles: self.metrics.accepted_profiles.load(Ordering::Relaxed),
-            rejected_profiles: self.metrics.rejected_profiles.load(Ordering::Relaxed),
-            failed_operations: self.metrics.failed_operations.load(Ordering::Relaxed),
-        }
-    }
-}
+        let delayed_count = {
+            // This is approximate since we can't lock in a sync context
+            // In practice, you might want to track this differently
+            0 // Placeholder
+        };
 
-impl Drop for ProfileValidationPool {
-    fn drop(&mut self) {
-        // Dropping tx will signal workers to shut down
+        ProfileValidatorMetricsSnapshot {
+            queued_operations: self.metrics.queued_operations.load(AtomicOrdering::Relaxed),
+            delayed_operations: delayed_count,
+            processed_profiles: self.metrics.processed_profiles.load(AtomicOrdering::Relaxed),
+            accepted_profiles: self.metrics.accepted_profiles.load(AtomicOrdering::Relaxed),
+            rejected_profiles: self.metrics.rejected_profiles.load(AtomicOrdering::Relaxed),
+            failed_operations: self.metrics.failed_operations.load(AtomicOrdering::Relaxed),
+            rate_limited_retries: self.metrics.rate_limited_retries.load(AtomicOrdering::Relaxed),
+            max_retries_exceeded: self.metrics.max_retries_exceeded.load(AtomicOrdering::Relaxed),
+        }
     }
 }
