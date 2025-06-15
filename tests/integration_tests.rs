@@ -7,29 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-// Mock relay server for testing
-struct MockRelay {
-    events: Vec<Event>,
-}
-
-impl MockRelay {
-    fn new() -> Self {
-        Self { events: Vec::new() }
-    }
-
-    fn add_profile(&mut self, name: &str, about: &str, picture: &str) {
-        let content = format!(
-            r#"{{"name":"{}","about":"{}","picture":"{}"}}"#,
-            name, about, picture
-        );
-        let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Metadata, content)
-            .sign_with_keys(&keys)
-            .unwrap();
-        self.events.push(event);
-    }
-}
-
 #[tokio::test]
 #[ignore] // This test requires a running relay
 async fn test_real_time_subscription_integration() {
@@ -88,7 +65,7 @@ async fn test_real_time_subscription_integration() {
         .author(profile_event.pubkey)
         .kind(Kind::Metadata);
 
-    let results = db
+    let _ = db
         .query(vec![stored_filter], &nostr_lmdb::Scope::Default)
         .await
         .unwrap();
@@ -103,8 +80,6 @@ async fn test_real_time_subscription_integration() {
 #[test]
 fn test_event_filtering() {
     // Test that filters correctly identify metadata events
-    let metadata_filter = Filter::new().kind(Kind::Metadata);
-
     let keys = Keys::generate();
     let metadata_event = EventBuilder::new(Kind::Metadata, "{}")
         .sign_with_keys(&keys)

@@ -100,7 +100,6 @@ pub struct ProfileValidatorMetricsSnapshot {
 
 /// Context for processing profile validation requests
 struct ProcessContext<'a> {
-    _immediate_tx: &'a flume::Sender<ProfileValidationRequest>,
     delayed_queue: &'a Arc<Mutex<BinaryHeap<DelayedRequest>>>,
     database: &'a Arc<RelayDatabase>,
     filter: &'a Arc<ProfileQualityFilter>,
@@ -148,7 +147,6 @@ impl ProfileValidationPool {
         // Spawn worker tasks
         for worker_id in 0..worker_count {
             let immediate_rx = immediate_rx.clone();
-            let immediate_tx = immediate_tx.clone();
             let delayed_queue = delayed_queue.clone();
             let database = database.clone();
             let filter = filter.clone();
@@ -170,7 +168,6 @@ impl ProfileValidationPool {
                             match result {
                                 Ok(req) => {
                                     let ctx = ProcessContext {
-                                        _immediate_tx: &immediate_tx,
                                         delayed_queue: &delayed_queue,
                                         database: &database,
                                         filter: &filter,
@@ -190,7 +187,6 @@ impl ProfileValidationPool {
                         _ = Self::wait_for_delayed_ready(&delayed_queue) => {
                             if let Some(req) = Self::pop_ready_delayed(&delayed_queue, &metrics).await {
                                 let ctx = ProcessContext {
-                                    _immediate_tx: &immediate_tx,
                                     delayed_queue: &delayed_queue,
                                     database: &database,
                                     filter: &filter,
@@ -222,7 +218,7 @@ impl ProfileValidationPool {
             let cancel = cancellation_token.clone();
 
             let cleanup_handle = tokio::spawn(async move {
-                let mut cleanup_interval = tokio::time::interval(Duration::from_secs(3600)); // Every hour
+                let mut cleanup_interval = tokio::time::interval(Duration::from_secs(300)); // Every 5 minutes
                 cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                 loop {
@@ -231,8 +227,8 @@ impl ProfileValidationPool {
                             let mut queue = delayed_queue.lock().await;
                             let before_size = queue.len();
 
-                            // Remove events older than 24 hours
-                            const MAX_EVENT_AGE: Duration = Duration::from_secs(86400);
+                            // Remove events older than 1 hour
+                            const MAX_EVENT_AGE: Duration = Duration::from_secs(3600);
                             queue.retain(|delayed| {
                                 delayed.request.age() < MAX_EVENT_AGE
                             });
@@ -317,44 +313,41 @@ impl ProfileValidationPool {
                         .fetch_add(1, AtomicOrdering::Relaxed);
 
                     // Check retry count
-                    if req.retry_count < 5 {
-                        // Parse retry delay from error (or use default)
-                        let retry_delay = Self::parse_retry_delay(&e.to_string())
-                            .unwrap_or(Duration::from_secs(60));
+                    if req.retry_count < 3 {
+                        // Use exponential backoff: 30s, 2min, 8min
+                        let base_delay = Self::parse_retry_delay(&e.to_string())
+                            .unwrap_or(Duration::from_secs(30));
+                        let retry_delay = base_delay * (1 << req.retry_count); // Exponential backoff
 
                         let retry_time = Instant::now() + retry_delay;
                         let retry_count = req.retry_count;
-                        let delayed_req = DelayedRequest {
-                            earliest_retry_time: retry_time,
-                            request: req.with_retry(retry_time),
-                        };
 
                         // Add to delayed queue with size and age limits
                         let mut queue = ctx.delayed_queue.lock().await;
 
-                        // Clean up old events and maintain size limit
-                        const MAX_DELAYED_QUEUE_SIZE: usize = 300000; // ~630MB at 2.1KB per event
-                        const MAX_EVENT_AGE: Duration = Duration::from_secs(86400); // 24 hours for daily rate limits
+                        // Limit queue size to prevent CPU thrashing
+                        const MAX_DELAYED_QUEUE_SIZE: usize = 10000;
 
-                        // Remove old events
-                        queue.retain(|delayed| delayed.request.age() < MAX_EVENT_AGE);
-
-                        // If still over capacity, drop oldest events
+                        // If at capacity, just drop this event instead of expensive sorting
                         if queue.len() >= MAX_DELAYED_QUEUE_SIZE {
-                            // Convert to vec, sort by age, keep newest
-                            let mut items: Vec<_> = queue.drain().collect();
-                            items.sort_by_key(|d| d.request.created_at);
-                            items.reverse(); // Newest first
-                            items.truncate(MAX_DELAYED_QUEUE_SIZE - 1); // Leave room for new one
-                            *queue = items.into_iter().collect();
-
-                            warn!(
-                                "Delayed queue at capacity ({}), dropped oldest events",
-                                MAX_DELAYED_QUEUE_SIZE
-                            );
+                            // Log once in a while, not every time
+                            if retry_count == 0 && queue.len() % 1000 == 0 {
+                                warn!(
+                                    "Delayed queue at capacity ({}), dropping new events",
+                                    MAX_DELAYED_QUEUE_SIZE
+                                );
+                            }
+                            // Drop this event instead of sorting 10k items
+                            ctx.metrics
+                                .max_retries_exceeded
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                        } else {
+                            let delayed_req = DelayedRequest {
+                                earliest_retry_time: retry_time,
+                                request: req.with_retry(retry_time),
+                            };
+                            queue.push(delayed_req);
                         }
-
-                        queue.push(delayed_req);
                         ctx.metrics
                             .delayed_operations
                             .store(queue.len(), AtomicOrdering::Relaxed);
