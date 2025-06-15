@@ -19,6 +19,7 @@ struct ProfileValidationRequest {
     scope: Scope,
     retry_count: u8,
     earliest_retry_time: Option<Instant>,
+    created_at: Instant,
 }
 
 impl ProfileValidationRequest {
@@ -28,6 +29,7 @@ impl ProfileValidationRequest {
             scope,
             retry_count: 0,
             earliest_retry_time: None,
+            created_at: Instant::now(),
         }
     }
 
@@ -35,6 +37,10 @@ impl ProfileValidationRequest {
         self.retry_count += 1;
         self.earliest_retry_time = Some(retry_time);
         self
+    }
+
+    fn age(&self) -> Duration {
+        Instant::now().duration_since(self.created_at)
     }
 }
 
@@ -182,7 +188,7 @@ impl ProfileValidationPool {
 
                         // Check for delayed work that's ready
                         _ = Self::wait_for_delayed_ready(&delayed_queue) => {
-                            if let Some(req) = Self::pop_ready_delayed(&delayed_queue).await {
+                            if let Some(req) = Self::pop_ready_delayed(&delayed_queue, &metrics).await {
                                 let ctx = ProcessContext {
                                     _immediate_tx: &immediate_tx,
                                     delayed_queue: &delayed_queue,
@@ -207,6 +213,46 @@ impl ProfileValidationPool {
             });
 
             handles.push(handle);
+        }
+
+        // Spawn a cleanup task for the delayed queue
+        {
+            let delayed_queue = delayed_queue.clone();
+            let metrics = metrics.clone();
+            let cancel = cancellation_token.clone();
+
+            let cleanup_handle = tokio::spawn(async move {
+                let mut cleanup_interval = tokio::time::interval(Duration::from_secs(3600)); // Every hour
+                cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+                loop {
+                    tokio::select! {
+                        _ = cleanup_interval.tick() => {
+                            let mut queue = delayed_queue.lock().await;
+                            let before_size = queue.len();
+
+                            // Remove events older than 24 hours
+                            const MAX_EVENT_AGE: Duration = Duration::from_secs(86400);
+                            queue.retain(|delayed| {
+                                delayed.request.age() < MAX_EVENT_AGE
+                            });
+
+                            let removed = before_size - queue.len();
+                            if removed > 0 {
+                                info!("Cleaned up {} expired events from delayed queue", removed);
+                                metrics.delayed_operations.store(queue.len(), AtomicOrdering::Relaxed);
+                            }
+                        }
+
+                        _ = cancel.cancelled() => {
+                            debug!("Delayed queue cleanup task cancelled");
+                            break;
+                        }
+                    }
+                }
+            });
+
+            handles.push(cleanup_handle);
         }
 
         Self {
@@ -283,12 +329,35 @@ impl ProfileValidationPool {
                             request: req.with_retry(retry_time),
                         };
 
-                        // Add to delayed queue
+                        // Add to delayed queue with size and age limits
                         let mut queue = ctx.delayed_queue.lock().await;
+
+                        // Clean up old events and maintain size limit
+                        const MAX_DELAYED_QUEUE_SIZE: usize = 300000; // ~630MB at 2.1KB per event
+                        const MAX_EVENT_AGE: Duration = Duration::from_secs(86400); // 24 hours for daily rate limits
+
+                        // Remove old events
+                        queue.retain(|delayed| delayed.request.age() < MAX_EVENT_AGE);
+
+                        // If still over capacity, drop oldest events
+                        if queue.len() >= MAX_DELAYED_QUEUE_SIZE {
+                            // Convert to vec, sort by age, keep newest
+                            let mut items: Vec<_> = queue.drain().collect();
+                            items.sort_by_key(|d| d.request.created_at);
+                            items.reverse(); // Newest first
+                            items.truncate(MAX_DELAYED_QUEUE_SIZE - 1); // Leave room for new one
+                            *queue = items.into_iter().collect();
+
+                            warn!(
+                                "Delayed queue at capacity ({}), dropped oldest events",
+                                MAX_DELAYED_QUEUE_SIZE
+                            );
+                        }
+
                         queue.push(delayed_req);
                         ctx.metrics
                             .delayed_operations
-                            .fetch_add(1, AtomicOrdering::Relaxed);
+                            .store(queue.len(), AtomicOrdering::Relaxed);
 
                         debug!(
                             "Worker {} queued rate-limited event for retry #{} at {:?}",
@@ -343,12 +412,16 @@ impl ProfileValidationPool {
     /// Pop a ready item from the delayed queue
     async fn pop_ready_delayed(
         delayed_queue: &Arc<Mutex<BinaryHeap<DelayedRequest>>>,
+        metrics: &Arc<ProfileValidatorMetrics>,
     ) -> Option<ProfileValidationRequest> {
         let mut queue = delayed_queue.lock().await;
 
         if let Some(item) = queue.peek() {
             if item.earliest_retry_time <= Instant::now() {
                 let delayed_req = queue.pop().unwrap();
+                metrics
+                    .delayed_operations
+                    .store(queue.len(), AtomicOrdering::Relaxed);
                 return Some(delayed_req.request);
             }
         }
