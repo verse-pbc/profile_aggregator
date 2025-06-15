@@ -2444,6 +2444,7 @@ dependencies = [
  "serde",
  "serde_json",
  "svgtypes",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

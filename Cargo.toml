@@ -52,3 +52,6 @@ flume = "0.11.1"
 # Rate limiting
 governor = "0.6"
 
+[dev-dependencies]
+tempfile = "3.10"
+
