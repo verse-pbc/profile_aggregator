@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
 
 /// Request to validate a profile with retry metadata
@@ -117,8 +117,9 @@ pub struct ProfileValidationPool {
     delayed_queue: Arc<Mutex<BinaryHeap<DelayedRequest>>>,
     // Metrics for monitoring
     metrics: Arc<ProfileValidatorMetrics>,
-    // Handles to worker tasks
-    _handles: Arc<Vec<JoinHandle<()>>>,
+    // Task tracker for graceful shutdown
+    #[allow(dead_code)]
+    task_tracker: TaskTracker,
 }
 
 impl ProfileValidationPool {
@@ -137,7 +138,7 @@ impl ProfileValidationPool {
         let (immediate_tx, immediate_rx) = flume::bounded(queue_size);
         let delayed_queue = Arc::new(Mutex::new(BinaryHeap::new()));
         let metrics = Arc::new(ProfileValidatorMetrics::default());
-        let mut handles = Vec::new();
+        let task_tracker = TaskTracker::new();
 
         info!(
             "Starting profile validation pool with {} workers, queue size {}",
@@ -154,7 +155,7 @@ impl ProfileValidationPool {
             let cancel = cancellation_token.clone();
             let gossip_client = Some(gossip_client.clone());
 
-            let handle = tokio::spawn(async move {
+            task_tracker.spawn(async move {
                 debug!("Profile validator worker {} started", worker_id);
 
                 loop {
@@ -207,8 +208,6 @@ impl ProfileValidationPool {
 
                 debug!("Profile validator worker {} stopped", worker_id);
             });
-
-            handles.push(handle);
         }
 
         // Spawn a cleanup task for the delayed queue
@@ -217,7 +216,7 @@ impl ProfileValidationPool {
             let metrics = metrics.clone();
             let cancel = cancellation_token.clone();
 
-            let cleanup_handle = tokio::spawn(async move {
+            task_tracker.spawn(async move {
                 let mut cleanup_interval = tokio::time::interval(Duration::from_secs(300)); // Every 5 minutes
                 cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -247,15 +246,13 @@ impl ProfileValidationPool {
                     }
                 }
             });
-
-            handles.push(cleanup_handle);
         }
 
         Self {
             immediate_tx,
             delayed_queue,
             metrics,
-            _handles: Arc::new(handles),
+            task_tracker,
         }
     }
 
