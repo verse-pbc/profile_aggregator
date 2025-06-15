@@ -15,7 +15,10 @@ use url::Url;
 /// Error types for profile validation
 #[derive(Debug)]
 pub enum ProfileValidationError {
-    RateLimited { domain: String, retry_after: Option<u64> },
+    RateLimited {
+        domain: String,
+        retry_after: Option<u64>,
+    },
     InvalidImage(String),
     InvalidProfile(String),
     NetworkError(String),
@@ -24,7 +27,10 @@ pub enum ProfileValidationError {
 impl fmt::Display for ProfileValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RateLimited { domain, retry_after } => {
+            Self::RateLimited {
+                domain,
+                retry_after,
+            } => {
                 if let Some(seconds) = retry_after {
                     write!(f, "Rate limited by {}: retry after {}s", domain, seconds)
                 } else {
@@ -209,9 +215,9 @@ impl ProfileQualityFilter {
                 if nip05.contains("mostr.pub") || nip05.contains("mostr-pub") {
                     debug!("Skipping mostr.pub account");
                     return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
-                Ok(cmds) => Ok(cmds),
-                Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
-            };
+                        Ok(cmds) => Ok(cmds),
+                        Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+                    };
                 }
             }
         }
@@ -235,7 +241,12 @@ impl ProfileQualityFilter {
         }
 
         // Check for about field
-        if profile_data.about.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        if profile_data
+            .about
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
             debug!("Rejecting profile - no about");
             return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
                 Ok(cmds) => Ok(cmds),
@@ -316,9 +327,9 @@ impl ProfileQualityFilter {
                             event.pubkey.to_hex()[..8].to_string() + "..."
                         );
                         return match self.get_delete_if_exists(event.pubkey, &subdomain).await {
-                Ok(cmds) => Ok(cmds),
-                Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
-            };
+                            Ok(cmds) => Ok(cmds),
+                            Err(e) => Err(ProfileValidationError::NetworkError(e.to_string())),
+                        };
                     }
 
                     // Profile passed - prepare store commands

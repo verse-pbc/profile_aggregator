@@ -224,8 +224,12 @@ impl ProfileValidationPool {
         worker_id: usize,
     ) {
         // Update metrics
-        ctx.metrics.queued_operations.fetch_sub(1, AtomicOrdering::Relaxed);
-        ctx.metrics.processed_profiles.fetch_add(1, AtomicOrdering::Relaxed);
+        ctx.metrics
+            .queued_operations
+            .fetch_sub(1, AtomicOrdering::Relaxed);
+        ctx.metrics
+            .processed_profiles
+            .fetch_add(1, AtomicOrdering::Relaxed);
 
         // Process the event
         let result = if let Some(client) = ctx.gossip_client {
@@ -237,14 +241,17 @@ impl ProfileValidationPool {
                 .apply_filter(req.event.clone(), req.scope.clone())
                 .await
         };
-        
-        match result
-        {
+
+        match result {
             Ok(commands) => {
                 if commands.is_empty() {
-                    ctx.metrics.rejected_profiles.fetch_add(1, AtomicOrdering::Relaxed);
+                    ctx.metrics
+                        .rejected_profiles
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                 } else {
-                    ctx.metrics.accepted_profiles.fetch_add(1, AtomicOrdering::Relaxed);
+                    ctx.metrics
+                        .accepted_profiles
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                 }
 
                 // Save to database
@@ -257,7 +264,9 @@ impl ProfileValidationPool {
             Err(e) => {
                 // Check if it's a rate limit error
                 if e.to_string().contains("Rate limited") {
-                    ctx.metrics.rate_limited_retries.fetch_add(1, AtomicOrdering::Relaxed);
+                    ctx.metrics
+                        .rate_limited_retries
+                        .fetch_add(1, AtomicOrdering::Relaxed);
 
                     // Check retry count
                     if req.retry_count < 5 {
@@ -275,7 +284,9 @@ impl ProfileValidationPool {
                         // Add to delayed queue
                         let mut queue = ctx.delayed_queue.lock().await;
                         queue.push(delayed_req);
-                        ctx.metrics.delayed_operations.fetch_add(1, AtomicOrdering::Relaxed);
+                        ctx.metrics
+                            .delayed_operations
+                            .fetch_add(1, AtomicOrdering::Relaxed);
 
                         debug!(
                             "Worker {} queued rate-limited event for retry #{} at {:?}",
@@ -285,8 +296,12 @@ impl ProfileValidationPool {
                         );
                     } else {
                         // Max retries exceeded
-                        ctx.metrics.max_retries_exceeded.fetch_add(1, AtomicOrdering::Relaxed);
-                        ctx.metrics.failed_operations.fetch_add(1, AtomicOrdering::Relaxed);
+                        ctx.metrics
+                            .max_retries_exceeded
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        ctx.metrics
+                            .failed_operations
+                            .fetch_add(1, AtomicOrdering::Relaxed);
                         warn!(
                             "Worker {} giving up on event after {} retries",
                             worker_id, req.retry_count
@@ -294,7 +309,9 @@ impl ProfileValidationPool {
                     }
                 } else {
                     // Other error
-                    ctx.metrics.failed_operations.fetch_add(1, AtomicOrdering::Relaxed);
+                    ctx.metrics
+                        .failed_operations
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                     warn!("Worker {} failed to process event: {}", worker_id, e);
                 }
             }
@@ -326,14 +343,14 @@ impl ProfileValidationPool {
         delayed_queue: &Arc<Mutex<BinaryHeap<DelayedRequest>>>,
     ) -> Option<ProfileValidationRequest> {
         let mut queue = delayed_queue.lock().await;
-        
+
         if let Some(item) = queue.peek() {
             if item.earliest_retry_time <= Instant::now() {
                 let delayed_req = queue.pop().unwrap();
                 return Some(delayed_req.request);
             }
         }
-        
+
         None
     }
 
@@ -387,12 +404,21 @@ impl ProfileValidationPool {
         ProfileValidatorMetricsSnapshot {
             queued_operations: self.metrics.queued_operations.load(AtomicOrdering::Relaxed),
             delayed_operations: delayed_count,
-            processed_profiles: self.metrics.processed_profiles.load(AtomicOrdering::Relaxed),
+            processed_profiles: self
+                .metrics
+                .processed_profiles
+                .load(AtomicOrdering::Relaxed),
             accepted_profiles: self.metrics.accepted_profiles.load(AtomicOrdering::Relaxed),
             rejected_profiles: self.metrics.rejected_profiles.load(AtomicOrdering::Relaxed),
             failed_operations: self.metrics.failed_operations.load(AtomicOrdering::Relaxed),
-            rate_limited_retries: self.metrics.rate_limited_retries.load(AtomicOrdering::Relaxed),
-            max_retries_exceeded: self.metrics.max_retries_exceeded.load(AtomicOrdering::Relaxed),
+            rate_limited_retries: self
+                .metrics
+                .rate_limited_retries
+                .load(AtomicOrdering::Relaxed),
+            max_retries_exceeded: self
+                .metrics
+                .max_retries_exceeded
+                .load(AtomicOrdering::Relaxed),
         }
     }
 }

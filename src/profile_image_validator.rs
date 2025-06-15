@@ -55,12 +55,18 @@ impl ProfileImageValidator {
     }
 
     /// Check if a URL's domain is currently rate limited
-    pub async fn is_domain_rate_limited(&self, url: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    pub async fn is_domain_rate_limited(
+        &self,
+        url: &str,
+    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         self.rate_limit_manager.is_domain_rate_limited(url).await
     }
 
     /// Get the wait time until a domain is no longer rate limited
-    pub async fn get_rate_limit_wait_time(&self, url: &str) -> Result<Option<Duration>, Box<dyn Error + Send + Sync>> {
+    pub async fn get_rate_limit_wait_time(
+        &self,
+        url: &str,
+    ) -> Result<Option<Duration>, Box<dyn Error + Send + Sync>> {
         self.rate_limit_manager.get_rate_limit_wait_time(url).await
     }
 
@@ -221,7 +227,9 @@ impl ProfileImageValidator {
             if let Ok(retry_str) = retry_after.to_str() {
                 // Retry-After can be seconds or HTTP date
                 if let Ok(seconds) = retry_str.parse::<u64>() {
-                    self.rate_limit_manager.update_rate_limiter(domain, Some(seconds)).await;
+                    self.rate_limit_manager
+                        .update_rate_limiter(domain, Some(seconds))
+                        .await;
                 }
             }
         }

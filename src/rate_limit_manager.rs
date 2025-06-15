@@ -26,7 +26,10 @@ impl RateLimitManager {
     }
 
     /// Check if a domain is currently rate limited without making a request
-    pub async fn is_domain_rate_limited(&self, url: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    pub async fn is_domain_rate_limited(
+        &self,
+        url: &str,
+    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         // Extract domain from URL
         let parsed_url = Url::parse(url)?;
         let domain = parsed_url
@@ -42,10 +45,7 @@ impl RateLimitManager {
                 Ok(_) => Ok(false), // Not rate limited
                 Err(not_until) => {
                     let wait_time = not_until.wait_time_from(Clock::now(&DefaultClock::default()));
-                    debug!(
-                        "Domain {} is rate limited for {:?}",
-                        domain, wait_time
-                    );
+                    debug!("Domain {} is rate limited for {:?}", domain, wait_time);
                     Ok(true) // Rate limited
                 }
             }
@@ -56,7 +56,10 @@ impl RateLimitManager {
     }
 
     /// Get the wait time until a domain is no longer rate limited
-    pub async fn get_rate_limit_wait_time(&self, url: &str) -> Result<Option<Duration>, Box<dyn Error + Send + Sync>> {
+    pub async fn get_rate_limit_wait_time(
+        &self,
+        url: &str,
+    ) -> Result<Option<Duration>, Box<dyn Error + Send + Sync>> {
         let parsed_url = Url::parse(url)?;
         let domain = parsed_url
             .domain()
@@ -80,7 +83,7 @@ impl RateLimitManager {
     /// Update rate limiter based on 429 response
     pub async fn update_rate_limiter(&self, domain: &str, retry_after_seconds: Option<u64>) {
         let mut limiters = self.domain_rate_limiters.lock().await;
-        
+
         // Calculate appropriate quota based on retry-after
         let quota = if let Some(seconds) = retry_after_seconds {
             // If we need to wait N seconds, allow 1 request per N seconds
@@ -92,11 +95,13 @@ impl RateLimitManager {
         };
 
         limiters.insert(domain.to_string(), Arc::new(RateLimiter::keyed(quota)));
-        
+
         warn!(
             "Updated rate limiter for {}: {:?}",
-            domain, 
-            retry_after_seconds.map(|s| format!("{}s", s)).unwrap_or("default".to_string())
+            domain,
+            retry_after_seconds
+                .map(|s| format!("{}s", s))
+                .unwrap_or("default".to_string())
         );
     }
 
@@ -125,7 +130,7 @@ impl RateLimitManager {
     pub async fn check_rate_limit(&self, domain: &str) -> Result<(), Duration> {
         let limiter = self.get_or_create_limiter(domain).await;
         let domain_string = domain.to_string();
-        
+
         match limiter.check_key(&domain_string) {
             Ok(_) => Ok(()),
             Err(not_until) => {

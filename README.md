@@ -26,6 +26,9 @@ docker run -p 8080:8080 ghcr.io/verse-pbc/profile_aggregator:latest
 git clone https://github.com/verse-pbc/profile_aggregator.git
 cd profile_aggregator
 
+# Install git hooks
+./scripts/setup-hooks.sh
+
 # Build the project
 cargo build --release
 
