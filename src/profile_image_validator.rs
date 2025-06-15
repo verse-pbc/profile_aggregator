@@ -84,6 +84,12 @@ impl ProfileImageValidator {
             return Ok(None);
         }
 
+        // Skip imgur.com gallery links (only accept direct image links from i.imgur.com)
+        if url.contains("imgur.com") && !url.contains("i.imgur.com") {
+            debug!("Rejecting imgur gallery link (not a direct image): {}", url);
+            return Ok(None);
+        }
+
         match self.get_info(url).await {
             Ok(info) => {
                 debug!(
