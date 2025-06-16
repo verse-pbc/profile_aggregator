@@ -44,7 +44,8 @@ graph TD
 - **Nostr Relay**: Standard relay on port 8080
 - **Profile Quality Filter**: Shared validation logic
   - Requires: name, bio, valid image (300x600px min)
-  - Verifies: published text notes via outbox
+  - Verifies: at least 1 published text note (kind 1) via outbox/gossip
+  - Collects: relay lists (10002) and DM relay lists (10050) for accepted profiles
   - Excludes: bridges, mostr accounts, ActivityPub fields
 
 ## Quick Start
