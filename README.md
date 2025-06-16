@@ -26,17 +26,18 @@ graph TD
     V -->|validate| PQF
     AS -->|manages| H
     
-    NC -->|REQ/EVENT| NR
+    NC -->|REQ| NR
+    NC -->|EVENT| NR
     NR -->|validate| PQF
     
     PQF -->|store| DB
-    DB -->|query| NR
     NR -->|EVENT| NC
+    NR <-->|query| DB
 ```
 
 ## How it Works
 
-- **Aggregation Service**: Harvests profiles from external relays
+- **Aggregation Service**: Manages harvesting from external relays
   - Historical pagination + real-time subscriptions
   - Sequential processing to avoid rate limiting
   - Exponential backoff on failures
