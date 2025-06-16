@@ -52,11 +52,11 @@ fn create_test_profile_event(name: &str, about: &str, picture: &str) -> Event {
 async fn test_pool_initialization() {
     let (pool, _, _) = create_test_setup();
 
-    let metrics = pool.metrics();
-    assert_eq!(metrics.queued_operations, 0);
-    assert_eq!(metrics.processed_profiles, 0);
-    assert_eq!(metrics.accepted_profiles, 0);
-    assert_eq!(metrics.rejected_profiles, 0);
+    let metrics = pool.metrics().await;
+    assert_eq!(metrics.current_queued, 0);
+    assert_eq!(metrics.total_processed, 0);
+    assert_eq!(metrics.total_accepted, 0);
+    assert_eq!(metrics.total_rejected, 0);
 }
 
 #[tokio::test]
@@ -76,8 +76,8 @@ async fn test_submit_profiles() {
     // Give workers time to process
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let metrics = pool.metrics();
-    assert!(metrics.queued_operations > 0 || metrics.processed_profiles > 0);
+    let metrics = pool.metrics().await;
+    assert!(metrics.current_queued > 0 || metrics.total_processed > 0);
 }
 
 #[tokio::test]
@@ -98,9 +98,9 @@ async fn test_rate_limited_retry() {
     // Give workers time to process
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let metrics = pool.metrics();
-    assert!(metrics.processed_profiles > 0);
-    assert_eq!(metrics.accepted_profiles, 0); // Should be rejected
+    let metrics = pool.metrics().await;
+    assert!(metrics.total_processed > 0);
+    assert_eq!(metrics.total_accepted, 0); // Should be rejected
 }
 
 #[tokio::test]
@@ -127,16 +127,16 @@ async fn test_cancellation() {
     // Give workers time to stop
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let metrics = pool.metrics();
+    let metrics = pool.metrics().await;
     // Should have processed some but not all due to cancellation
-    assert!(metrics.processed_profiles < 100);
+    assert!(metrics.total_processed < 100);
 }
 
 #[tokio::test]
 async fn test_metrics_accuracy() {
     let (pool, _, _) = create_test_setup();
 
-    let initial_metrics = pool.metrics();
+    let initial_metrics = pool.metrics().await;
 
     // Submit profiles that will be rejected (no picture)
     let events = vec![
@@ -151,29 +151,27 @@ async fn test_metrics_accuracy() {
     // Wait for processing
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let final_metrics = pool.metrics();
-    assert!(final_metrics.processed_profiles > initial_metrics.processed_profiles);
-    assert_eq!(
-        final_metrics.accepted_profiles,
-        initial_metrics.accepted_profiles
-    ); // All rejected
-    assert!(final_metrics.rejected_profiles > initial_metrics.rejected_profiles);
+    let final_metrics = pool.metrics().await;
+    assert!(final_metrics.total_processed > initial_metrics.total_processed);
+    assert_eq!(final_metrics.total_accepted, initial_metrics.total_accepted); // All rejected
+    assert!(final_metrics.total_rejected > initial_metrics.total_rejected);
 }
 
 #[test]
 fn test_metrics_snapshot() {
     let snapshot = ProfileValidatorMetricsSnapshot {
-        queued_operations: 10,
-        delayed_operations: 5,
-        processed_profiles: 100,
-        accepted_profiles: 80,
-        rejected_profiles: 20,
-        failed_operations: 0,
-        rate_limited_retries: 15,
-        max_retries_exceeded: 2,
+        current_queued: 10,
+        current_delayed_retry_queue: 5,
+        total_processed: 100,
+        total_accepted: 80,
+        total_rejected: 20,
+        total_failed: 0,
+        total_rate_limited: 15,
+        total_max_retries_exceeded: 2,
+        top_rate_limited_domains: vec![("example.com".to_string(), 10)],
     };
 
-    assert_eq!(snapshot.queued_operations, 10);
-    assert_eq!(snapshot.processed_profiles, 100);
-    assert_eq!(snapshot.accepted_profiles + snapshot.rejected_profiles, 100);
+    assert_eq!(snapshot.current_queued, 10);
+    assert_eq!(snapshot.total_processed, 100);
+    assert_eq!(snapshot.total_accepted + snapshot.total_rejected, 100);
 }

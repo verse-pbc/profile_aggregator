@@ -1,13 +1,13 @@
 # Profile Aggregator
 
-A Nostr relay that aggregates high-quality user profiles from the network.
+A Nostr relay that aggregates and filters user profiles from the network.
 
 ## What it does
 
-- Discovers profiles from other relays
-- Validates profile quality (bio, image size, real activity)
-- Filters out bots and low-quality accounts
-- Serves curated profiles via WebSocket
+- Harvests profiles from external relays
+- Validates quality (bio, image validity, spam filtering)
+- Serves filtered profiles via standard Nostr protocol
+- All events (harvested or client-submitted) go through the same filter
 
 ## Quick Start
 
@@ -46,7 +46,7 @@ cargo build --release
 
 ## API
 
-- `ws://localhost:8080` - Nostr WebSocket
+- `ws://localhost:8080` - Nostr relay endpoint
 - `http://localhost:8080/health` - Health check
 
 ## License

@@ -68,10 +68,11 @@ async fn main() -> Result<()> {
         .parse()
         .unwrap_or(300);
 
+    // Default to fewer workers to avoid aggressive rate limiting on image hosts
     let worker_threads: usize = std::env::var("WORKER_THREADS")
-        .unwrap_or_else(|_| "20".to_string())
+        .unwrap_or_else(|_| "5".to_string())
         .parse()
-        .unwrap_or(20);
+        .unwrap_or(5);
 
     let state_file =
         std::env::var("STATE_FILE").unwrap_or_else(|_| "./data/aggregation_state.json".to_string());
@@ -98,7 +99,7 @@ async fn main() -> Result<()> {
     // Create relay info for NIP-11
     let relay_info = RelayInfo {
         name: "Profile Aggregator Relay".to_string(),
-        description: "A relay that aggregates and filters high-quality user profiles".to_string(),
+        description: "A relay that aggregates and filters user profiles".to_string(),
         pubkey: config.keys.public_key().to_hex(),
         contact: std::env::var("RELAY_CONTACT")
             .unwrap_or_else(|_| "admin@relay.example".to_string()),

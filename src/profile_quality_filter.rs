@@ -88,12 +88,15 @@ impl ProfileQualityFilter {
         let rate_limit_manager = Arc::new(RateLimitManager::new());
         Self {
             // Single image validator with shared rate limiter
-            image_validator: Arc::new(ProfileImageValidator::with_rate_limiter(
-                300,  // min_width
-                600,  // min_height
-                true, // allow_animated
-                rate_limit_manager,
-            )),
+            image_validator: Arc::new(
+                ProfileImageValidator::with_rate_limiter(
+                    300,  // min_width
+                    600,  // min_height
+                    true, // allow_animated
+                    rate_limit_manager,
+                )
+                .expect("Failed to create ProfileImageValidator"),
+            ),
             database,
             skip_mostr,
             skip_fields,

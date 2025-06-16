@@ -23,6 +23,7 @@ image = { version = "0.25", default-features = false, features = [
     "exr", "hdr", "pnm", "tga"
 ] }
 imageinfo = "0.7"
+imagesize = "0.12"
 reqwest = { version = "0.12", features = ["stream"] }
 base64 = "0.22"
 svgtypes = "0.15"

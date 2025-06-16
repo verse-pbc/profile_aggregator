@@ -34,7 +34,7 @@ echo "✓ Formatting check passed"
 
 # Run clippy
 echo "Running clippy linter..."
-if ! cargo clippy -- -D warnings; then
+if ! cargo clippy --all-targets -- -D warnings; then
     echo "❌ Clippy check failed!"
     echo "Fix the clippy warnings before committing"
     exit 1

@@ -1,6 +1,6 @@
-//! Profile Aggregation Service - Aggregates high-quality user profiles from external relays
+//! Profile Aggregation Service - Aggregates user profiles from external relays
 //!
-//! This service fetches user profiles from external relays, validates their quality,
+//! This service fetches user profiles from external relays, validates them,
 //! and saves accepted profiles to the database for broadcasting.
 
 use crate::profile_quality_filter::ProfileQualityFilter;
@@ -189,8 +189,8 @@ impl ProfileAggregationService {
             relay_handles.push(handle);
         }
 
-        // Log metrics periodically
-        let mut metrics_interval = interval(Duration::from_secs(60));
+        // Log metrics periodically (every 20 seconds)
+        let mut metrics_interval = interval(Duration::from_secs(20));
         let validation_pool = self.validation_pool.clone();
 
         // Periodic state saving
@@ -213,17 +213,28 @@ impl ProfileAggregationService {
                 }
 
                 _ = metrics_interval.tick() => {
-                    let metrics = validation_pool.metrics();
+                    let metrics = validation_pool.metrics().await;
                     info!(
-                        "Profile validation metrics: queued={}, processed={}, accepted={}, rejected={}, failed={}, rate_limited={}, delayed={}",
-                        metrics.queued_operations,
-                        metrics.processed_profiles,
-                        metrics.accepted_profiles,
-                        metrics.rejected_profiles,
-                        metrics.failed_operations,
-                        metrics.rate_limited_retries,
-                        metrics.delayed_operations
+                        "Validation metrics - Current: queued={}, delayed_retry_queue={} | Total: processed={}, accepted={}, rejected={}, failed={}, rate_limited={}",
+                        metrics.current_queued,
+                        metrics.current_delayed_retry_queue,
+                        metrics.total_processed,
+                        metrics.total_accepted,
+                        metrics.total_rejected,
+                        metrics.total_failed,
+                        metrics.total_rate_limited
                     );
+
+                    if !metrics.top_rate_limited_domains.is_empty() {
+                        info!(
+                            "Recently rate-limited domains (last 5 min): {}",
+                            metrics.top_rate_limited_domains
+                                .iter()
+                                .map(|(domain, count)| format!("{}: {}", domain, count))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
                 }
             }
         }
@@ -316,26 +327,11 @@ impl ProfileHarvester {
         match source {
             EventSource::Historical => {
                 info.historical_events += count as u64;
-                debug!(
-                    "Recorded {} historical events from {} (total historical: {})",
-                    count, self.relay_url, info.historical_events
-                );
             }
         }
 
         info.total_events_fetched += count as u64;
         info.last_activity = Timestamp::now();
-
-        // Log progress periodically
-        if info.total_events_fetched % 1000 == 0 {
-            info!(
-                "Progress for {}: {} total events (historical: {}, real-time: {})",
-                self.relay_url,
-                info.total_events_fetched,
-                info.historical_events,
-                info.realtime_events
-            );
-        }
     }
 
     async fn connect_and_harvest(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -600,13 +596,17 @@ impl ProfileHarvester {
                     last_until = oldest_timestamp;
                 }
 
-                debug!(
-                    "Page {} from {}: {} events, oldest: {}",
-                    page_number,
-                    self.relay_url,
-                    event_count,
-                    Self::format_timestamp(last_until)
-                );
+                // Log pagination progress less frequently
+                if page_number % 100 == 0 {
+                    debug!(
+                        "Pagination for {}: page {}, at timestamp {} ({}), {} events in this batch",
+                        self.relay_url,
+                        page_number,
+                        last_until.as_u64(),
+                        Self::format_timestamp(last_until),
+                        event_count
+                    );
+                }
             }
 
             // Small delay between pages to avoid overwhelming the relay
@@ -729,7 +729,7 @@ impl ProfileHarvester {
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                                     + 1;
 
-                                info!(
+                                debug!(
                                     "Real-time event #{} received: kind={}, author={}, created_at={}",
                                     count, event.kind, event.pubkey, event.created_at
                                 );
@@ -757,7 +757,7 @@ impl ProfileHarvester {
                                     }
                                 }
 
-                                if count % 10 == 0 {
+                                if count % 100 == 0 {
                                     info!(
                                         "Real-time subscription {}: processed {} events",
                                         relay_url, count

@@ -3,11 +3,11 @@ use nostr_lmdb::Scope;
 use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
@@ -73,29 +73,57 @@ impl PartialOrd for DelayedRequest {
 }
 
 /// Metrics for monitoring the profile validation pool
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct ProfileValidatorMetrics {
-    queued_operations: AtomicUsize,
-    delayed_operations: AtomicUsize,
-    processed_profiles: AtomicU64,
-    accepted_profiles: AtomicU64,
-    rejected_profiles: AtomicU64,
-    failed_operations: AtomicU64,
-    rate_limited_retries: AtomicU64,
-    max_retries_exceeded: AtomicU64,
+    // Current state (snapshots)
+    current_queued: AtomicUsize,
+    current_delayed_retry_queue: AtomicUsize,
+
+    // Cumulative counters
+    total_processed: AtomicU64,
+    total_accepted: AtomicU64,
+    total_rejected: AtomicU64,
+    total_failed: AtomicU64,
+    total_rate_limited: AtomicU64,
+    total_max_retries_exceeded: AtomicU64,
+
+    // Domain-specific rate limit tracking (domain -> (count, last_hit_time))
+    rate_limited_domains: Arc<RwLock<HashMap<String, (u64, Instant)>>>,
+}
+
+impl Default for ProfileValidatorMetrics {
+    fn default() -> Self {
+        Self {
+            current_queued: AtomicUsize::new(0),
+            current_delayed_retry_queue: AtomicUsize::new(0),
+            total_processed: AtomicU64::new(0),
+            total_accepted: AtomicU64::new(0),
+            total_rejected: AtomicU64::new(0),
+            total_failed: AtomicU64::new(0),
+            total_rate_limited: AtomicU64::new(0),
+            total_max_retries_exceeded: AtomicU64::new(0),
+            rate_limited_domains: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
 }
 
 /// Snapshot of metrics for reporting
 #[derive(Debug, Clone)]
 pub struct ProfileValidatorMetricsSnapshot {
-    pub queued_operations: usize,
-    pub delayed_operations: usize,
-    pub processed_profiles: u64,
-    pub accepted_profiles: u64,
-    pub rejected_profiles: u64,
-    pub failed_operations: u64,
-    pub rate_limited_retries: u64,
-    pub max_retries_exceeded: u64,
+    // Current state (snapshots)
+    pub current_queued: usize,
+    pub current_delayed_retry_queue: usize,
+
+    // Cumulative counters
+    pub total_processed: u64,
+    pub total_accepted: u64,
+    pub total_rejected: u64,
+    pub total_failed: u64,
+    pub total_rate_limited: u64,
+    pub total_max_retries_exceeded: u64,
+
+    // Top rate-limited domains
+    pub top_rate_limited_domains: Vec<(String, u64)>,
 }
 
 /// Context for processing profile validation requests
@@ -235,8 +263,30 @@ impl ProfileValidationPool {
                             let removed = before_size - queue.len();
                             if removed > 0 {
                                 info!("Cleaned up {} expired events from delayed queue", removed);
-                                metrics.delayed_operations.store(queue.len(), AtomicOrdering::Relaxed);
+                                metrics.current_delayed_retry_queue.store(queue.len(), AtomicOrdering::Relaxed);
                             }
+
+                            // Check if queue is at or near capacity
+                            const MAX_DELAYED_QUEUE_SIZE: usize = 10000;
+                            if queue.len() >= MAX_DELAYED_QUEUE_SIZE * 9 / 10 {
+                                warn!(
+                                    "Delayed retry queue is {}% full ({}/{} events). Consider increasing worker threads or queue size.",
+                                    (queue.len() * 100) / MAX_DELAYED_QUEUE_SIZE,
+                                    queue.len(),
+                                    MAX_DELAYED_QUEUE_SIZE
+                                );
+                            }
+
+                            // Also clean up rate-limited domains periodically
+                            let domains = metrics.rate_limited_domains.clone();
+                            tokio::spawn(async move {
+                                let mut domains_guard = domains.write().await;
+                                let now = Instant::now();
+                                // Remove domains that haven't been rate limited in the last hour
+                                domains_guard.retain(|_, (count, last_hit)| {
+                                    *count >= 10 && now.duration_since(*last_hit) < Duration::from_secs(3600)
+                                });
+                            });
                         }
 
                         _ = cancel.cancelled() => {
@@ -263,13 +313,13 @@ impl ProfileValidationPool {
         worker_id: usize,
     ) {
         // Update metrics - use saturating_sub to prevent underflow
-        let _ = ctx.metrics.queued_operations.fetch_update(
+        let _ = ctx.metrics.current_queued.fetch_update(
             AtomicOrdering::Relaxed,
             AtomicOrdering::Relaxed,
             |val| val.checked_sub(1),
         );
         ctx.metrics
-            .processed_profiles
+            .total_processed
             .fetch_add(1, AtomicOrdering::Relaxed);
 
         // Process the event
@@ -287,11 +337,11 @@ impl ProfileValidationPool {
             Ok(commands) => {
                 if commands.is_empty() {
                     ctx.metrics
-                        .rejected_profiles
+                        .total_rejected
                         .fetch_add(1, AtomicOrdering::Relaxed);
                 } else {
                     ctx.metrics
-                        .accepted_profiles
+                        .total_accepted
                         .fetch_add(1, AtomicOrdering::Relaxed);
                 }
 
@@ -304,10 +354,30 @@ impl ProfileValidationPool {
             }
             Err(e) => {
                 // Check if it's a rate limit error
-                if e.to_string().contains("Rate limited") {
+                let error_msg = e.to_string();
+                if error_msg.contains("Rate limited") {
                     ctx.metrics
-                        .rate_limited_retries
+                        .total_rate_limited
                         .fetch_add(1, AtomicOrdering::Relaxed);
+
+                    // Extract domain from error message (format: "Rate limited by domain.com")
+                    if let Some(start) = error_msg.find("Rate limited by ") {
+                        let domain_part = &error_msg[start + 16..];
+                        if let Some(end) = domain_part.find(':').or(Some(domain_part.len())) {
+                            let domain = domain_part[..end].to_string();
+                            debug!("Rate limit hit for domain: {}", domain);
+
+                            // Track domain-specific rate limits
+                            let domains = ctx.metrics.rate_limited_domains.clone();
+                            tokio::spawn(async move {
+                                let mut domains_guard = domains.write().await;
+                                let entry =
+                                    domains_guard.entry(domain).or_insert((0, Instant::now()));
+                                entry.0 += 1;
+                                entry.1 = Instant::now();
+                            });
+                        }
+                    }
 
                     // Check retry count
                     if req.retry_count < 3 {
@@ -341,13 +411,8 @@ impl ProfileValidationPool {
                             // Rebuild the heap
                             *queue = items.into_iter().collect();
 
-                            warn!(
-                                "Delayed queue at capacity ({}), dropped {} oldest events, {} remaining",
-                                MAX_DELAYED_QUEUE_SIZE, dropped, queue.len()
-                            );
-
                             ctx.metrics
-                                .max_retries_exceeded
+                                .total_max_retries_exceeded
                                 .fetch_add(dropped as u64, AtomicOrdering::Relaxed);
                         }
 
@@ -358,7 +423,7 @@ impl ProfileValidationPool {
                         };
                         queue.push(delayed_req);
                         ctx.metrics
-                            .delayed_operations
+                            .current_delayed_retry_queue
                             .store(queue.len(), AtomicOrdering::Relaxed);
 
                         debug!(
@@ -370,10 +435,10 @@ impl ProfileValidationPool {
                     } else {
                         // Max retries exceeded
                         ctx.metrics
-                            .max_retries_exceeded
+                            .total_max_retries_exceeded
                             .fetch_add(1, AtomicOrdering::Relaxed);
                         ctx.metrics
-                            .failed_operations
+                            .total_failed
                             .fetch_add(1, AtomicOrdering::Relaxed);
                         debug!(
                             "Worker {} giving up on event after {} retries",
@@ -383,7 +448,7 @@ impl ProfileValidationPool {
                 } else {
                     // Other error
                     ctx.metrics
-                        .failed_operations
+                        .total_failed
                         .fetch_add(1, AtomicOrdering::Relaxed);
                     warn!("Worker {} failed to process event: {}", worker_id, e);
                 }
@@ -422,7 +487,7 @@ impl ProfileValidationPool {
             if item.earliest_retry_time <= Instant::now() {
                 let delayed_req = queue.pop().unwrap();
                 metrics
-                    .delayed_operations
+                    .current_delayed_retry_queue
                     .store(queue.len(), AtomicOrdering::Relaxed);
                 return Some(delayed_req.request);
             }
@@ -454,7 +519,7 @@ impl ProfileValidationPool {
         for event in events {
             // Update metrics
             self.metrics
-                .queued_operations
+                .current_queued
                 .fetch_add(1, AtomicOrdering::Relaxed);
 
             // Create new request
@@ -471,31 +536,43 @@ impl ProfileValidationPool {
     }
 
     /// Get current metrics snapshot
-    pub fn metrics(&self) -> ProfileValidatorMetricsSnapshot {
-        let delayed_count = {
-            // This is approximate since we can't lock in a sync context
-            // In practice, you might want to track this differently
-            0 // Placeholder
-        };
+    pub async fn metrics(&self) -> ProfileValidatorMetricsSnapshot {
+        // Get top rate-limited domains (only those hit in the last 5 minutes)
+        let domains_guard = self.metrics.rate_limited_domains.read().await;
+        let now = Instant::now();
+        let recent_window = Duration::from_secs(300); // 5 minutes
+
+        let mut domain_counts: Vec<(String, u64)> = domains_guard
+            .iter()
+            .filter(|(_, (_, last_hit))| now.duration_since(*last_hit) < recent_window)
+            .map(|(k, (count, _))| (k.clone(), *count))
+            .collect();
+        domain_counts.sort_by(|a, b| b.1.cmp(&a.1));
+        let top_domains = domain_counts.into_iter().take(5).collect();
+        drop(domains_guard);
 
         ProfileValidatorMetricsSnapshot {
-            queued_operations: self.metrics.queued_operations.load(AtomicOrdering::Relaxed),
-            delayed_operations: delayed_count,
-            processed_profiles: self
+            // Current state (snapshots)
+            current_queued: self.metrics.current_queued.load(AtomicOrdering::Relaxed),
+            current_delayed_retry_queue: self
                 .metrics
-                .processed_profiles
+                .current_delayed_retry_queue
                 .load(AtomicOrdering::Relaxed),
-            accepted_profiles: self.metrics.accepted_profiles.load(AtomicOrdering::Relaxed),
-            rejected_profiles: self.metrics.rejected_profiles.load(AtomicOrdering::Relaxed),
-            failed_operations: self.metrics.failed_operations.load(AtomicOrdering::Relaxed),
-            rate_limited_retries: self
+
+            // Cumulative counters
+            total_processed: self.metrics.total_processed.load(AtomicOrdering::Relaxed),
+            total_accepted: self.metrics.total_accepted.load(AtomicOrdering::Relaxed),
+            total_rejected: self.metrics.total_rejected.load(AtomicOrdering::Relaxed),
+            total_failed: self.metrics.total_failed.load(AtomicOrdering::Relaxed),
+            total_rate_limited: self
                 .metrics
-                .rate_limited_retries
+                .total_rate_limited
                 .load(AtomicOrdering::Relaxed),
-            max_retries_exceeded: self
+            total_max_retries_exceeded: self
                 .metrics
-                .max_retries_exceeded
+                .total_max_retries_exceeded
                 .load(AtomicOrdering::Relaxed),
+            top_rate_limited_domains: top_domains,
         }
     }
 }
