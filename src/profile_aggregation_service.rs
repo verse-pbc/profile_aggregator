@@ -540,10 +540,10 @@ impl ProfileHarvester {
                     );
 
                     if consecutive_errors >= 3 {
-                        return Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Failed after {} consecutive errors", consecutive_errors),
-                        )));
+                        return Err(Box::new(std::io::Error::other(format!(
+                            "Failed after {} consecutive errors",
+                            consecutive_errors
+                        ))));
                     }
 
                     let backoff = Duration::from_secs(30 * consecutive_errors as u64);

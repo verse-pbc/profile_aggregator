@@ -33,7 +33,7 @@ jobs:
       run: cargo build --release
     
     - name: Run clippy
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --all-targets -- -D warnings
     
     - name: Check formatting
       run: cargo fmt -- --check
