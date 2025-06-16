@@ -68,11 +68,11 @@ async fn main() -> Result<()> {
         .parse()
         .unwrap_or(300);
 
-    // Default to fewer workers to avoid aggressive rate limiting on image hosts
+    // Default to single worker to minimize rate limiting on image hosts
     let worker_threads: usize = std::env::var("WORKER_THREADS")
-        .unwrap_or_else(|_| "5".to_string())
+        .unwrap_or_else(|_| "1".to_string())
         .parse()
-        .unwrap_or(5);
+        .unwrap_or(1);
 
     let state_file =
         std::env::var("STATE_FILE").unwrap_or_else(|_| "./data/aggregation_state.json".to_string());
