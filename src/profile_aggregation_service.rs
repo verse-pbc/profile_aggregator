@@ -63,6 +63,11 @@ struct AggregationState {
     last_saved: Timestamp,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum EventSource {
+    Historical,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RelayPaginationInfo {
     /// Start of current window
@@ -71,6 +76,12 @@ struct RelayPaginationInfo {
     last_until_timestamp: Timestamp,
     /// Total events fetched from this relay
     total_events_fetched: u64,
+    /// Events from historical pagination
+    historical_events: u64,
+    /// Events from real-time subscription
+    realtime_events: u64,
+    /// Last activity timestamp
+    last_activity: Timestamp,
     /// Whether we've completed the current window
     window_complete: bool,
 }
@@ -262,7 +273,7 @@ struct ProfileHarvester {
 }
 
 impl ProfileHarvester {
-    async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut backoff = self.config.initial_backoff;
 
         loop {
@@ -286,7 +297,48 @@ impl ProfileHarvester {
         Ok(())
     }
 
-    async fn connect_and_harvest(&self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Record events processed from either source
+    async fn record_events_processed(&self, source: EventSource, count: usize) {
+        let mut state_guard = self.state.write().await;
+        let info = state_guard
+            .relay_states
+            .entry(self.relay_url.clone())
+            .or_insert_with(|| RelayPaginationInfo {
+                window_start: Timestamp::now(),
+                last_until_timestamp: Timestamp::now(),
+                total_events_fetched: 0,
+                historical_events: 0,
+                realtime_events: 0,
+                last_activity: Timestamp::now(),
+                window_complete: false,
+            });
+
+        match source {
+            EventSource::Historical => {
+                info.historical_events += count as u64;
+                debug!(
+                    "Recorded {} historical events from {} (total historical: {})",
+                    count, self.relay_url, info.historical_events
+                );
+            }
+        }
+
+        info.total_events_fetched += count as u64;
+        info.last_activity = Timestamp::now();
+
+        // Log progress periodically
+        if info.total_events_fetched % 1000 == 0 {
+            info!(
+                "Progress for {}: {} total events (historical: {}, real-time: {})",
+                self.relay_url,
+                info.total_events_fetched,
+                info.historical_events,
+                info.realtime_events
+            );
+        }
+    }
+
+    async fn connect_and_harvest(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Connecting to {}", self.relay_url);
 
         // Initialize rustls if needed
@@ -313,6 +365,7 @@ impl ProfileHarvester {
             let relay_url = self.relay_url.clone();
             let cancellation_token = self.cancellation_token.clone();
             let filters = self.config.filters.clone();
+            let state = self.state.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = Self::run_realtime_subscription(
@@ -322,6 +375,7 @@ impl ProfileHarvester {
                     realtime_start,
                     filters,
                     cancellation_token,
+                    state,
                 )
                 .await
                 {
@@ -337,150 +391,236 @@ impl ProfileHarvester {
     async fn run_backward_pagination(
         &self,
         client: Client,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // Get or initialize pagination state
-        let (window_start, mut last_until) = {
-            let state_guard = self.state.read().await;
-            if let Some(info) = state_guard.relay_states.get(&self.relay_url) {
-                if info.window_complete {
-                    let new_window_start = info.window_start;
-                    info!(
-                        "Starting new window for {} from {}",
-                        self.relay_url,
-                        Self::format_timestamp(new_window_start)
-                    );
-                    (new_window_start, Timestamp::now())
-                } else {
-                    info!(
-                        "Continuing window for {} until {}",
-                        self.relay_url,
-                        Self::format_timestamp(info.last_until_timestamp)
-                    );
-                    (info.window_start, info.last_until_timestamp)
-                }
-            } else {
-                let now = Timestamp::now();
-                info!("Starting first window for {}", self.relay_url);
-                (now, now)
-            }
-        };
-
-        let mut page_number = 0u64;
-        let mut consecutive_empty_pages = 0u32;
-
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         loop {
-            page_number += 1;
+            // Get or initialize pagination state
+            let (_window_start, start_time) = {
+                let state_guard = self.state.read().await;
+                if let Some(info) = state_guard.relay_states.get(&self.relay_url) {
+                    if info.window_complete {
+                        let new_window_start = info.window_start;
+                        info!(
+                            "Starting new window for {} from {}",
+                            self.relay_url,
+                            Self::format_timestamp(new_window_start)
+                        );
+                        (new_window_start, Timestamp::now())
+                    } else {
+                        info!(
+                            "Continuing window for {} until {}",
+                            self.relay_url,
+                            Self::format_timestamp(info.last_until_timestamp)
+                        );
+                        (info.window_start, info.last_until_timestamp)
+                    }
+                } else {
+                    let now = Timestamp::now();
+                    info!("Starting first window for {}", self.relay_url);
+                    (now, now)
+                }
+            };
+
+            // Run pagination directly
+            let (last_timestamp, total_events) = self
+                .paginate_time_range(
+                    client.clone(),
+                    start_time,
+                    Timestamp::from(0), // Go all the way back to timestamp 0
+                )
+                .await?;
+
+            // Update final state with last timestamp
+            {
+                let mut state_guard = self.state.write().await;
+                if let Some(info) = state_guard.relay_states.get_mut(&self.relay_url) {
+                    info.last_until_timestamp = last_timestamp;
+                    // Mark window complete if we hit empty pages (handled by paginate_time_range)
+                    if last_timestamp > Timestamp::from(0) {
+                        info.window_complete = true;
+                        info!(
+                            "Window complete for {} - processed {} events, stopped at {}",
+                            self.relay_url,
+                            total_events,
+                            Self::format_timestamp(last_timestamp)
+                        );
+                    }
+                }
+            }
+
+            // Check if we should continue with a new window
             if self.cancellation_token.is_cancelled() {
                 break;
             }
+        }
 
-            // Create filters for backward pagination
+        Ok(())
+    }
+
+    /// Paginate through a specific time range, processing events directly
+    ///
+    /// # Arguments
+    /// * `client` - The Nostr client
+    /// * `start_time` - The most recent timestamp to start from (moving backward)
+    /// * `end_time` - The oldest timestamp to stop at
+    ///
+    /// # Returns
+    /// * `Ok((last_timestamp, total_events))` - The last timestamp reached and total events processed
+    /// * `Err` if pagination was interrupted or failed
+    async fn paginate_time_range(
+        &self,
+        client: Client,
+        start_time: Timestamp,
+        end_time: Timestamp,
+    ) -> Result<(Timestamp, u64), Box<dyn std::error::Error + Send + Sync>> {
+        let mut last_until = start_time;
+        let mut total_events = 0u64;
+        let mut page_number = 0u64;
+        let mut consecutive_empty_pages = 0u32;
+        let mut consecutive_errors = 0u32;
+
+        info!(
+            "Starting pagination for {} from {} to {}",
+            self.relay_url,
+            Self::format_timestamp(start_time),
+            Self::format_timestamp(end_time)
+        );
+
+        loop {
+            page_number += 1;
+
+            // Check for cancellation
+            if self.cancellation_token.is_cancelled() {
+                info!("Pagination cancelled for {}", self.relay_url);
+                break;
+            }
+
+            // Check if we've reached the end time
+            if last_until <= end_time {
+                info!(
+                    "Reached end time {} for {}",
+                    Self::format_timestamp(end_time),
+                    self.relay_url
+                );
+                break;
+            }
+
+            // Create filters for this page
             let mut page_filters = self.config.filters.clone();
             for filter in &mut page_filters {
-                filter.since = None;
+                filter.since = Some(end_time); // Don't go older than end_time
                 filter.until = Some(last_until);
                 filter.limit = Some(self.config.page_size);
             }
 
-            info!(
+            debug!(
                 "Fetching page {} from {} (until: {})",
                 page_number,
                 self.relay_url,
                 Self::format_timestamp(last_until)
             );
 
-            // Fetch events
+            // Fetch events with retry logic
             let events = match self.fetch_events_page(&client, page_filters).await {
-                Ok(events) => events,
+                Ok(events) => {
+                    consecutive_errors = 0;
+                    events
+                }
                 Err(e) => {
-                    error!("Failed to fetch page: {}, retrying...", e);
-                    sleep(Duration::from_secs(30)).await;
+                    consecutive_errors += 1;
+                    error!(
+                        "Failed to fetch page from {}: {} (attempt {})",
+                        self.relay_url, e, consecutive_errors
+                    );
+
+                    if consecutive_errors >= 3 {
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Failed after {} consecutive errors", consecutive_errors),
+                        )));
+                    }
+
+                    let backoff = Duration::from_secs(30 * consecutive_errors as u64);
+                    sleep(backoff).await;
                     continue;
                 }
             };
 
             let event_count = events.len();
 
-            if event_count > 0 {
-                consecutive_empty_pages = 0;
+            // Handle empty pages
+            if event_count == 0 {
+                consecutive_empty_pages += 1;
+                debug!(
+                    "Empty page {} from {} (consecutive: {})",
+                    page_number, self.relay_url, consecutive_empty_pages
+                );
 
-                // Process events in parallel using the event processor pool
-                let mut oldest_timestamp = Timestamp::now();
-
-                // Find oldest timestamp
-                for event in &events {
-                    if event.created_at < oldest_timestamp {
-                        oldest_timestamp = event.created_at;
-                    }
+                if consecutive_empty_pages >= 3 {
+                    info!(
+                        "No more events found for {} after {} empty pages",
+                        self.relay_url, consecutive_empty_pages
+                    );
+                    break;
                 }
+            } else {
+                consecutive_empty_pages = 0;
+                total_events += event_count as u64;
 
-                // Submit all events to the pool at once
+                // Submit events directly to validation pool
                 if let Err(e) = self
                     .validation_pool
-                    .submit_profiles(events, nostr_lmdb::Scope::Default)
+                    .submit_profiles(events.clone(), nostr_lmdb::Scope::Default)
                     .await
                 {
                     error!("Failed to submit profiles to validation pool: {}", e);
+                    // Continue with next batch instead of failing completely
                     continue;
                 }
 
-                // Update state
-                let total_events = {
-                    let mut state_guard = self.state.write().await;
-                    let info = state_guard
-                        .relay_states
-                        .entry(self.relay_url.clone())
-                        .or_insert_with(|| RelayPaginationInfo {
-                            window_start,
-                            last_until_timestamp: last_until,
-                            total_events_fetched: 0,
-                            window_complete: false,
-                        });
-                    info.total_events_fetched += event_count as u64;
-                    info.total_events_fetched
-                };
+                // Track events processed
+                self.record_events_processed(EventSource::Historical, event_count)
+                    .await;
 
-                info!(
-                    "Submitted {} events from page {} (total: {}) - {}",
-                    event_count, page_number, total_events, self.relay_url
-                );
+                // Update last_until to the oldest timestamp from this batch
+                let oldest_timestamp = events
+                    .iter()
+                    .map(|e| e.created_at)
+                    .min()
+                    .unwrap_or(last_until);
 
-                // Update pagination timestamp
-                // Protection against pages that don't change their until value
-                if oldest_timestamp == last_until {
-                    // Subtract one second to avoid getting stuck
-                    last_until = Timestamp::from(oldest_timestamp.as_u64().saturating_sub(1));
+                // Protection against pagination getting stuck
+                if oldest_timestamp == last_until && event_count > 0 {
                     warn!(
-                        "Page timestamp unchanged ({}), adjusting to prevent loop",
-                        oldest_timestamp
+                        "Pagination stuck at {} for {}, adjusting timestamp",
+                        Self::format_timestamp(last_until),
+                        self.relay_url
                     );
+                    last_until = Timestamp::from(last_until.as_u64().saturating_sub(1));
                 } else {
                     last_until = oldest_timestamp;
                 }
 
-                let mut state_guard = self.state.write().await;
-                if let Some(info) = state_guard.relay_states.get_mut(&self.relay_url) {
-                    info.last_until_timestamp = last_until;
-                }
-            } else {
-                consecutive_empty_pages += 1;
-                if consecutive_empty_pages >= 3 {
-                    info!("Window complete for {}", self.relay_url);
-
-                    let mut state_guard = self.state.write().await;
-                    if let Some(info) = state_guard.relay_states.get_mut(&self.relay_url) {
-                        info.window_complete = true;
-                    }
-
-                    // Start new window
-                    last_until = Timestamp::now();
-                    page_number = 0;
-                    consecutive_empty_pages = 0;
-                }
+                debug!(
+                    "Page {} from {}: {} events, oldest: {}",
+                    page_number,
+                    self.relay_url,
+                    event_count,
+                    Self::format_timestamp(last_until)
+                );
             }
+
+            // Small delay between pages to avoid overwhelming the relay
+            sleep(Duration::from_millis(100)).await;
         }
 
-        Ok(())
+        info!(
+            "Pagination complete for {}: {} total events, stopped at {}",
+            self.relay_url,
+            total_events,
+            Self::format_timestamp(last_until)
+        );
+
+        Ok((last_until, total_events))
     }
 
     async fn fetch_events_page(
@@ -529,6 +669,7 @@ impl ProfileHarvester {
         since: Timestamp,
         filters: Vec<Filter>,
         cancellation_token: CancellationToken,
+        state: Arc<RwLock<AggregationState>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!(
             "Starting real-time subscription for {} since {}",
@@ -560,6 +701,7 @@ impl ProfileHarvester {
         // Handle incoming events
         let event_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let event_count_clone = event_count.clone();
+        let relay_url_for_tracking = relay_url.clone();
 
         client
             .handle_notifications(|notification| {
@@ -568,6 +710,8 @@ impl ProfileHarvester {
                 let validation_pool = validation_pool.clone();
                 let relay_url = relay_url.clone();
                 let event_count_clone = event_count_clone.clone();
+                let state = state.clone();
+                let relay_url_for_tracking = relay_url_for_tracking.clone();
 
                 async move {
                     if cancellation_token.is_cancelled() {
@@ -596,7 +740,24 @@ impl ProfileHarvester {
                                     .await
                                 {
                                     error!("Failed to submit real-time event: {}", e);
-                                } else if count % 10 == 0 {
+                                } else {
+                                    // Track real-time event
+                                    let mut state_guard = state.write().await;
+                                    if let Some(info) = state_guard.relay_states.get_mut(&relay_url_for_tracking) {
+                                        info.realtime_events += 1;
+                                        info.total_events_fetched += 1;
+                                        info.last_activity = Timestamp::now();
+
+                                        if info.realtime_events % 100 == 0 {
+                                            debug!(
+                                                "Real-time progress for {}: {} events",
+                                                relay_url_for_tracking, info.realtime_events
+                                            );
+                                        }
+                                    }
+                                }
+
+                                if count % 10 == 0 {
                                     info!(
                                         "Real-time subscription {}: processed {} events",
                                         relay_url, count

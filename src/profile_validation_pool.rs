@@ -325,26 +325,38 @@ impl ProfileValidationPool {
                         // Limit queue size to prevent CPU thrashing
                         const MAX_DELAYED_QUEUE_SIZE: usize = 10000;
 
-                        // If at capacity, just drop this event instead of expensive sorting
+                        // If at capacity, drop oldest events (1/3 of queue) to make room
                         if queue.len() >= MAX_DELAYED_QUEUE_SIZE {
-                            // Log once in a while, not every time
-                            if retry_count == 0 && queue.len() % 1000 == 0 {
-                                warn!(
-                                    "Delayed queue at capacity ({}), dropping new events",
-                                    MAX_DELAYED_QUEUE_SIZE
-                                );
-                            }
-                            // Drop this event instead of sorting 10k items
+                            // Convert to Vec for efficient sorting and truncation
+                            let mut items: Vec<_> = queue.drain().collect();
+
+                            // Sort by retry time (oldest first)
+                            items.sort_by_key(|d| d.earliest_retry_time);
+
+                            // Drop the oldest 1/3
+                            let to_keep = (items.len() * 2) / 3;
+                            let dropped = items.len() - to_keep;
+                            items.truncate(to_keep);
+
+                            // Rebuild the heap
+                            *queue = items.into_iter().collect();
+
+                            warn!(
+                                "Delayed queue at capacity ({}), dropped {} oldest events, {} remaining",
+                                MAX_DELAYED_QUEUE_SIZE, dropped, queue.len()
+                            );
+
                             ctx.metrics
                                 .max_retries_exceeded
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                        } else {
-                            let delayed_req = DelayedRequest {
-                                earliest_retry_time: retry_time,
-                                request: req.with_retry(retry_time),
-                            };
-                            queue.push(delayed_req);
+                                .fetch_add(dropped as u64, AtomicOrdering::Relaxed);
                         }
+
+                        // Add the new event
+                        let delayed_req = DelayedRequest {
+                            earliest_retry_time: retry_time,
+                            request: req.with_retry(retry_time),
+                        };
+                        queue.push(delayed_req);
                         ctx.metrics
                             .delayed_operations
                             .store(queue.len(), AtomicOrdering::Relaxed);
