@@ -24,7 +24,6 @@ async fn create_test_service() -> (ProfileAggregationService, TempDir) {
         state_file,
         initial_backoff: Duration::from_millis(100),
         max_backoff: Duration::from_secs(1),
-        worker_threads: 2,
     };
 
     let service = ProfileAggregationService::new(config, filter, db)
@@ -46,8 +45,7 @@ async fn test_config_defaults() {
     assert_eq!(config.page_size, 500);
     assert_eq!(config.initial_backoff, Duration::from_secs(2));
     assert_eq!(config.max_backoff, Duration::from_secs(300));
-    assert!(config.worker_threads > 0);
-    assert!(config.worker_threads <= 10);
+    // Worker threads configuration has been removed
 }
 
 #[tokio::test]
@@ -84,7 +82,6 @@ async fn test_state_persistence() {
         state_file: state_file.clone(),
         initial_backoff: Duration::from_millis(100),
         max_backoff: Duration::from_secs(1),
-        worker_threads: 2,
     };
 
     let _service = ProfileAggregationService::new(config, filter, db)
@@ -146,7 +143,6 @@ async fn test_multiple_relay_configuration() {
         state_file,
         initial_backoff: Duration::from_millis(100),
         max_backoff: Duration::from_secs(1),
-        worker_threads: 2,
     };
 
     let _service = ProfileAggregationService::new(config.clone(), filter, db)

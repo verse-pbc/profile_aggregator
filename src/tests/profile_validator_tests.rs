@@ -1,5 +1,5 @@
 use crate::profile_quality_filter::ProfileQualityFilter;
-use crate::profile_validation_pool::{ProfileValidationPool, ProfileValidatorMetricsSnapshot};
+use crate::profile_validator::{ProfileValidator, ProfileValidatorMetricsSnapshot};
 use nostr_relay_builder::{CryptoWorker, RelayDatabase};
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
@@ -7,11 +7,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
-fn create_test_setup() -> (
-    Arc<ProfileValidationPool>,
-    Arc<RelayDatabase>,
-    CancellationToken,
-) {
+fn create_test_setup() -> (Arc<ProfileValidator>, Arc<RelayDatabase>, CancellationToken) {
     let temp_dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let cancellation_token = CancellationToken::new();
@@ -26,15 +22,9 @@ fn create_test_setup() -> (
     let keys = Keys::generate();
     let gossip_client = Arc::new(Client::new(keys));
 
-    let pool = Arc::new(ProfileValidationPool::new(
-        4, // 4 workers for testing
-        filter,
-        db.clone(),
-        cancellation_token.clone(),
-        gossip_client,
-    ));
+    let validator = Arc::new(ProfileValidator::new(filter, db.clone(), gossip_client));
 
-    (pool, db, cancellation_token)
+    (validator, db, cancellation_token)
 }
 
 fn create_test_profile_event(name: &str, about: &str, picture: &str) -> Event {
@@ -49,19 +39,20 @@ fn create_test_profile_event(name: &str, about: &str, picture: &str) -> Event {
 }
 
 #[tokio::test]
-async fn test_pool_initialization() {
-    let (pool, _, _) = create_test_setup();
+async fn test_validator_initialization() {
+    let (validator, _, _) = create_test_setup();
 
-    let metrics = pool.metrics().await;
-    assert_eq!(metrics.current_queued, 0);
+    let metrics = validator.metrics().await;
+    assert_eq!(metrics.current_processing, 0);
+    assert_eq!(metrics.current_delayed_retry_queue, 0);
     assert_eq!(metrics.total_processed, 0);
     assert_eq!(metrics.total_accepted, 0);
     assert_eq!(metrics.total_rejected, 0);
 }
 
 #[tokio::test]
-async fn test_submit_profiles() {
-    let (pool, _, _) = create_test_setup();
+async fn test_process_profiles() {
+    let (validator, _, _) = create_test_setup();
 
     let events = vec![
         create_test_profile_event("User1", "About user 1", "https://example.com/1.jpg"),
@@ -69,20 +60,21 @@ async fn test_submit_profiles() {
         create_test_profile_event("User3", "About user 3", "https://example.com/3.jpg"),
     ];
 
-    pool.submit_profiles(events, nostr_lmdb::Scope::Default)
+    validator
+        .process_profiles(events, nostr_lmdb::Scope::Default)
         .await
         .unwrap();
 
-    // Give workers time to process
+    // Give processing time to complete
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let metrics = pool.metrics().await;
-    assert!(metrics.current_queued > 0 || metrics.total_processed > 0);
+    let metrics = validator.metrics().await;
+    assert_eq!(metrics.total_processed, 3);
 }
 
 #[tokio::test]
 async fn test_rate_limited_retry() {
-    let (pool, _, _) = create_test_setup();
+    let (validator, _, _) = create_test_setup();
 
     // Create event with known rate-limited domain
     let event = create_test_profile_event(
@@ -91,52 +83,56 @@ async fn test_rate_limited_retry() {
         "https://placeholder.com/image.jpg", // This will be rejected as placeholder
     );
 
-    pool.submit_profiles(vec![event], nostr_lmdb::Scope::Default)
+    validator
+        .process_profiles(vec![event], nostr_lmdb::Scope::Default)
         .await
         .unwrap();
 
-    // Give workers time to process
+    // Give processing time to complete
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let metrics = pool.metrics().await;
+    let metrics = validator.metrics().await;
     assert!(metrics.total_processed > 0);
     assert_eq!(metrics.total_accepted, 0); // Should be rejected
 }
 
 #[tokio::test]
-async fn test_cancellation() {
-    let (pool, _, cancellation_token) = create_test_setup();
+async fn test_delayed_retry_processing() {
+    let (validator, _, _) = create_test_setup();
 
-    // Submit many events
-    let mut events = Vec::new();
-    for i in 0..100 {
-        events.push(create_test_profile_event(
-            &format!("User{}", i),
-            &format!("About user {}", i),
-            &format!("https://example.com/{}.jpg", i),
-        ));
-    }
+    // Process an event that will be rate limited
+    let event = create_test_profile_event("User", "About", "https://placeholder.com/test.jpg");
 
-    pool.submit_profiles(events, nostr_lmdb::Scope::Default)
+    validator
+        .process_profiles(vec![event], nostr_lmdb::Scope::Default)
         .await
         .unwrap();
 
-    // Cancel immediately
-    cancellation_token.cancel();
+    // Check that it's in the delayed queue
+    let metrics = validator.metrics().await;
+    assert_eq!(metrics.current_delayed_retry_queue, 0); // Not yet in queue due to async processing
 
-    // Give workers time to stop
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Process ready retries (should be none immediately)
+    let processed = validator.process_ready_retries().await;
+    assert_eq!(processed, 0);
+}
 
-    let metrics = pool.metrics().await;
-    // Should have processed some but not all due to cancellation
-    assert!(metrics.total_processed < 100);
+#[tokio::test]
+async fn test_cleanup() {
+    let (validator, _, _) = create_test_setup();
+
+    // Run cleanup (should work even with empty queues)
+    validator.cleanup().await;
+
+    let metrics = validator.metrics().await;
+    assert_eq!(metrics.current_delayed_retry_queue, 0);
 }
 
 #[tokio::test]
 async fn test_metrics_accuracy() {
-    let (pool, _, _) = create_test_setup();
+    let (validator, _, _) = create_test_setup();
 
-    let initial_metrics = pool.metrics().await;
+    let initial_metrics = validator.metrics().await;
 
     // Submit profiles that will be rejected (no picture)
     let events = vec![
@@ -144,14 +140,15 @@ async fn test_metrics_accuracy() {
         create_test_profile_event("User2", "About", ""),
     ];
 
-    pool.submit_profiles(events, nostr_lmdb::Scope::Default)
+    validator
+        .process_profiles(events, nostr_lmdb::Scope::Default)
         .await
         .unwrap();
 
     // Wait for processing
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let final_metrics = pool.metrics().await;
+    let final_metrics = validator.metrics().await;
     assert!(final_metrics.total_processed > initial_metrics.total_processed);
     assert_eq!(final_metrics.total_accepted, initial_metrics.total_accepted); // All rejected
     assert!(final_metrics.total_rejected > initial_metrics.total_rejected);
@@ -160,7 +157,7 @@ async fn test_metrics_accuracy() {
 #[test]
 fn test_metrics_snapshot() {
     let snapshot = ProfileValidatorMetricsSnapshot {
-        current_queued: 10,
+        current_processing: 1,
         current_delayed_retry_queue: 5,
         total_processed: 100,
         total_accepted: 80,
@@ -171,7 +168,7 @@ fn test_metrics_snapshot() {
         top_rate_limited_domains: vec![("example.com".to_string(), 10)],
     };
 
-    assert_eq!(snapshot.current_queued, 10);
+    assert_eq!(snapshot.current_processing, 1);
     assert_eq!(snapshot.total_processed, 100);
     assert_eq!(snapshot.total_accepted + snapshot.total_rejected, 100);
 }

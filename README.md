@@ -27,7 +27,6 @@ Key environment variables:
 |----------|-------------|---------|
 | `DISCOVERY_RELAY_URL` | Source relay for profiles | `wss://relay.nos.social` |
 | `BIND_ADDR` | Server address | `0.0.0.0:8080` |
-| `WORKER_THREADS` | Validation workers | `1` |
 | `DATABASE_PATH` | Data storage | `/data/profile_aggregator.db` |
 | `RUST_LOG` | Log level | `profile_aggregator=info` |
 

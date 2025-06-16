@@ -68,12 +68,6 @@ async fn main() -> Result<()> {
         .parse()
         .unwrap_or(300);
 
-    // Default to single worker to minimize rate limiting on image hosts
-    let worker_threads: usize = std::env::var("WORKER_THREADS")
-        .unwrap_or_else(|_| "1".to_string())
-        .parse()
-        .unwrap_or(1);
-
     let state_file =
         std::env::var("STATE_FILE").unwrap_or_else(|_| "./data/aggregation_state.json".to_string());
 
@@ -84,7 +78,6 @@ async fn main() -> Result<()> {
         state_file: PathBuf::from(state_file.clone()),
         initial_backoff: Duration::from_secs(initial_backoff_secs),
         max_backoff: Duration::from_secs(max_backoff_secs),
-        worker_threads,
     };
 
     // Create shared filter for both WebSocket and aggregation service
@@ -150,7 +143,6 @@ async fn main() -> Result<()> {
     println!("- Excludes: bridges, mostr accounts, profiles with fields array");
     println!("\nConfiguration:");
     println!("- Page size: {} events", page_size);
-    println!("- Workers: {} threads", worker_threads);
     println!("- Backoff: {}s-{}s", initial_backoff_secs, max_backoff_secs);
     println!("- Database: {}", database_path);
     println!("- State: {}", state_file);

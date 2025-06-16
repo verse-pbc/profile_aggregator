@@ -4,7 +4,7 @@
 //! and saves accepted profiles to the database for broadcasting.
 
 use crate::profile_quality_filter::ProfileQualityFilter;
-use crate::profile_validation_pool::ProfileValidationPool;
+use crate::profile_validator::ProfileValidator;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use nostr_relay_builder::RelayDatabase;
@@ -34,8 +34,6 @@ pub struct ProfileAggregationConfig {
     pub initial_backoff: Duration,
     /// Maximum backoff duration
     pub max_backoff: Duration,
-    /// Number of worker threads for event processing
-    pub worker_threads: usize,
 }
 
 impl Default for ProfileAggregationConfig {
@@ -47,9 +45,6 @@ impl Default for ProfileAggregationConfig {
             state_file: PathBuf::from("./data/aggregation_state.json"),
             initial_backoff: Duration::from_secs(2),
             max_backoff: Duration::from_secs(300),
-            worker_threads: std::thread::available_parallelism()
-                .map(|n| n.get().min(10))
-                .unwrap_or(5),
         }
     }
 }
@@ -89,7 +84,7 @@ struct RelayPaginationInfo {
 /// Service that aggregates high-quality profiles from external relays
 pub struct ProfileAggregationService {
     config: ProfileAggregationConfig,
-    validation_pool: Arc<ProfileValidationPool>,
+    validator: Arc<ProfileValidator>,
     state: Arc<RwLock<AggregationState>>,
     cancellation_token: CancellationToken,
 }
@@ -138,18 +133,16 @@ impl ProfileAggregationService {
 
         let gossip_client = Arc::new(gossip_client);
 
-        // Create profile validation pool with gossip client
-        let validation_pool = Arc::new(ProfileValidationPool::new(
-            config.worker_threads,
+        // Create profile validator
+        let validator = Arc::new(ProfileValidator::new(
             filter.clone(),
             database.clone(),
-            cancellation_token.clone(),
             gossip_client.clone(),
         ));
 
         Ok(Self {
             config,
-            validation_pool,
+            validator,
             state,
             cancellation_token,
         })
@@ -158,9 +151,8 @@ impl ProfileAggregationService {
     /// Run the aggregation service
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         info!(
-            "Starting profile aggregation service: {} relays, {} workers",
+            "Starting profile aggregation service: {} relays",
             self.config.relay_urls.len(),
-            self.config.worker_threads,
         );
 
         // Create tasks for each relay
@@ -168,7 +160,7 @@ impl ProfileAggregationService {
 
         for relay_url in self.config.relay_urls.clone() {
             let config = self.config.clone();
-            let validation_pool = self.validation_pool.clone();
+            let validator = self.validator.clone();
             let state = self.state.clone();
             let cancellation_token = self.cancellation_token.clone();
 
@@ -176,7 +168,7 @@ impl ProfileAggregationService {
                 let harvester = ProfileHarvester {
                     relay_url: relay_url.clone(),
                     config,
-                    validation_pool,
+                    validator,
                     state,
                     cancellation_token,
                 };
@@ -191,7 +183,15 @@ impl ProfileAggregationService {
 
         // Log metrics periodically (every 20 seconds)
         let mut metrics_interval = interval(Duration::from_secs(20));
-        let validation_pool = self.validation_pool.clone();
+        let validator = self.validator.clone();
+
+        // Retry processing interval (every 5 seconds)
+        let mut retry_interval = interval(Duration::from_secs(5));
+        let retry_validator = self.validator.clone();
+
+        // Cleanup interval (every 5 minutes)
+        let mut cleanup_interval = interval(Duration::from_secs(300));
+        let cleanup_validator = self.validator.clone();
 
         // Periodic state saving
         let mut save_interval = interval(Duration::from_secs(30));
@@ -213,10 +213,10 @@ impl ProfileAggregationService {
                 }
 
                 _ = metrics_interval.tick() => {
-                    let metrics = validation_pool.metrics().await;
+                    let metrics = validator.metrics().await;
                     info!(
-                        "Validation metrics - Current: queued={}, delayed_retry_queue={} | Total: processed={}, accepted={}, rejected={}, failed={}, rate_limited={}",
-                        metrics.current_queued,
+                        "Validation metrics - Current: processing={}, delayed_retry_queue={} | Total: processed={}, accepted={}, rejected={}, failed={}, rate_limited={}",
+                        metrics.current_processing,
                         metrics.current_delayed_retry_queue,
                         metrics.total_processed,
                         metrics.total_accepted,
@@ -235,6 +235,17 @@ impl ProfileAggregationService {
                                 .join(", ")
                         );
                     }
+                }
+
+                _ = retry_interval.tick() => {
+                    let processed = retry_validator.process_ready_retries().await;
+                    if processed > 0 {
+                        debug!("Processed {} delayed retries", processed);
+                    }
+                }
+
+                _ = cleanup_interval.tick() => {
+                    cleanup_validator.cleanup().await;
                 }
             }
         }
@@ -278,7 +289,7 @@ impl ProfileAggregationService {
 struct ProfileHarvester {
     relay_url: String,
     config: ProfileAggregationConfig,
-    validation_pool: Arc<ProfileValidationPool>,
+    validator: Arc<ProfileValidator>,
     state: Arc<RwLock<AggregationState>>,
     cancellation_token: CancellationToken,
 }
@@ -357,7 +368,7 @@ impl ProfileHarvester {
         // Start real-time subscription for new events in the background
         {
             let client = client.clone();
-            let validation_pool = self.validation_pool.clone();
+            let validator = self.validator.clone();
             let relay_url = self.relay_url.clone();
             let cancellation_token = self.cancellation_token.clone();
             let filters = self.config.filters.clone();
@@ -366,7 +377,7 @@ impl ProfileHarvester {
             tokio::spawn(async move {
                 if let Err(e) = Self::run_realtime_subscription(
                     client,
-                    validation_pool,
+                    validator,
                     relay_url,
                     realtime_start,
                     filters,
@@ -562,13 +573,13 @@ impl ProfileHarvester {
                 consecutive_empty_pages = 0;
                 total_events += event_count as u64;
 
-                // Submit events directly to validation pool
+                // Process events directly through validator
                 if let Err(e) = self
-                    .validation_pool
-                    .submit_profiles(events.clone(), nostr_lmdb::Scope::Default)
+                    .validator
+                    .process_profiles(events.clone(), nostr_lmdb::Scope::Default)
                     .await
                 {
-                    error!("Failed to submit profiles to validation pool: {}", e);
+                    error!("Failed to process profiles: {}", e);
                     // Continue with next batch instead of failing completely
                     continue;
                 }
@@ -664,7 +675,7 @@ impl ProfileHarvester {
     /// Run a real-time subscription for new events
     async fn run_realtime_subscription(
         client: Client,
-        validation_pool: Arc<ProfileValidationPool>,
+        validator: Arc<ProfileValidator>,
         relay_url: String,
         since: Timestamp,
         filters: Vec<Filter>,
@@ -707,7 +718,7 @@ impl ProfileHarvester {
             .handle_notifications(|notification| {
                 let cancellation_token = cancellation_token.clone();
                 let sub_id = sub_id.clone();
-                let validation_pool = validation_pool.clone();
+                let validator = validator.clone();
                 let relay_url = relay_url.clone();
                 let event_count_clone = event_count_clone.clone();
                 let state = state.clone();
@@ -734,12 +745,12 @@ impl ProfileHarvester {
                                     count, event.kind, event.pubkey, event.created_at
                                 );
 
-                                // Submit event to validation pool
-                                if let Err(e) = validation_pool
-                                    .submit_profiles(vec![*event], nostr_lmdb::Scope::Default)
+                                // Process event through validator
+                                if let Err(e) = validator
+                                    .process_profiles(vec![*event], nostr_lmdb::Scope::Default)
                                     .await
                                 {
-                                    error!("Failed to submit real-time event: {}", e);
+                                    error!("Failed to process real-time event: {}", e);
                                 } else {
                                     // Track real-time event
                                     let mut state_guard = state.write().await;

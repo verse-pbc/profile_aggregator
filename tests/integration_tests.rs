@@ -29,7 +29,6 @@ async fn test_real_time_subscription_integration() {
         state_file,
         initial_backoff: Duration::from_millis(100),
         max_backoff: Duration::from_secs(1),
-        worker_threads: 2,
     };
 
     let service = ProfileAggregationService::new(config, filter, db.clone())
