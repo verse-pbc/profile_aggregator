@@ -2621,6 +2621,7 @@ dependencies = [
  "nostr-lmdb",
  "nostr-sdk",
  "nostr_relay_builder",
+ "rand 0.8.5",
  "reqwest",
  "rustls",
  "serde",
