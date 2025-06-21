@@ -5,7 +5,7 @@ use profile_aggregator::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 #[tokio::test]
 #[ignore] // This test requires a running relay
@@ -17,9 +17,9 @@ async fn test_real_time_subscription_integration() {
     let state_file = temp_dir.path().join("test_state.json");
 
     let keys = Keys::generate();
-    let cancellation_token = CancellationToken::new();
-    let crypto_worker = Arc::new(CryptoWorker::new(Arc::new(keys), cancellation_token));
-    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_worker).unwrap());
+    let task_tracker = TaskTracker::new();
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap());
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
     let config = ProfileAggregationConfig {

@@ -147,7 +147,7 @@ impl ProfileValidator {
 
                 // Save to database
                 for cmd in commands {
-                    if let Err(e) = self.database.save_store_command(cmd).await {
+                    if let Err(e) = self.database.save_store_command(cmd, None).await {
                         warn!("Failed to save event: {}", e);
                     }
                 }

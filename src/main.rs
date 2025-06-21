@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -34,14 +35,12 @@ async fn main() -> Result<()> {
 
     // Create the crypto worker and database
     let cancellation_token = CancellationToken::new();
-    let crypto_worker = Arc::new(CryptoWorker::new(
-        Arc::new(keys.clone()),
-        cancellation_token.clone(),
-    ));
+    let task_tracker = TaskTracker::new();
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
     let database_path = std::env::var("DATABASE_PATH")
         .unwrap_or_else(|_| "./data/profile_aggregator.db".to_string());
 
-    let database = Arc::new(RelayDatabase::new(&database_path, crypto_worker)?);
+    let database = Arc::new(RelayDatabase::new(&database_path, crypto_sender)?);
 
     // Configure the relay
     let relay_url =

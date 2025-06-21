@@ -6,16 +6,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 fn create_test_setup() -> (Arc<ProfileValidator>, Arc<RelayDatabase>, CancellationToken) {
     let temp_dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let cancellation_token = CancellationToken::new();
-    let crypto_worker = Arc::new(CryptoWorker::new(
-        Arc::new(keys.clone()),
-        cancellation_token.clone(),
-    ));
-    let db = Arc::new(RelayDatabase::new(temp_dir.path(), crypto_worker).unwrap());
+    let task_tracker = TaskTracker::new();
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
+    let db = Arc::new(RelayDatabase::new(temp_dir.path(), crypto_sender).unwrap());
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
     // Create a gossip client for testing

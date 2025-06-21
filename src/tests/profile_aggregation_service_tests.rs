@@ -5,16 +5,16 @@ use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 async fn create_test_service() -> (ProfileAggregationService, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_file = temp_dir.path().join("test_state.json");
 
     let keys = Keys::generate();
-    let cancellation_token = CancellationToken::new();
-    let crypto_worker = Arc::new(CryptoWorker::new(Arc::new(keys), cancellation_token));
-    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_worker).unwrap());
+    let task_tracker = TaskTracker::new();
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap());
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
     let config = ProfileAggregationConfig {
@@ -70,9 +70,9 @@ async fn test_state_persistence() {
 
     // Create service with existing state
     let keys = Keys::generate();
-    let cancellation_token = CancellationToken::new();
-    let crypto_worker = Arc::new(CryptoWorker::new(Arc::new(keys), cancellation_token));
-    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_worker).unwrap());
+    let task_tracker = TaskTracker::new();
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap());
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
     let config = ProfileAggregationConfig {
@@ -127,9 +127,9 @@ async fn test_multiple_relay_configuration() {
     let state_file = temp_dir.path().join("test_state.json");
 
     let keys = Keys::generate();
-    let cancellation_token = CancellationToken::new();
-    let crypto_worker = Arc::new(CryptoWorker::new(Arc::new(keys), cancellation_token));
-    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_worker).unwrap());
+    let task_tracker = TaskTracker::new();
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap());
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
     let config = ProfileAggregationConfig {

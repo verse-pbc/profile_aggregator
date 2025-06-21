@@ -3,14 +3,14 @@ use nostr_relay_builder::{CryptoWorker, RelayDatabase};
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 fn create_test_database() -> Arc<RelayDatabase> {
     let temp_dir = TempDir::new().unwrap();
     let keys = Keys::generate();
-    let cancellation_token = CancellationToken::new();
-    let crypto_worker = Arc::new(CryptoWorker::new(Arc::new(keys), cancellation_token));
-    Arc::new(RelayDatabase::new(temp_dir.path(), crypto_worker).unwrap())
+    let task_tracker = TaskTracker::new();
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
+    Arc::new(RelayDatabase::new(temp_dir.path(), crypto_sender).unwrap())
 }
 
 fn create_test_event(content: &str) -> Event {
