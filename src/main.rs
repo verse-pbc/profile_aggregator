@@ -731,9 +731,20 @@ async fn main() -> Result<()> {
             </ul>
             
             <div style="margin-top: 20px;">
-                <a href="/random" class="link-button">View Random Profiles (HTML)</a>
-                <a href="/random?count=20" class="link-button">Get 20 Random Profiles (JSON)</a>
+                <a href="/random" class="link-button">View Random Profiles</a>
+                <a href="/random?count=20" class="link-button">View 20 Random Profiles</a>
             </div>
+            
+            <h3>Example API Usage</h3>
+            <pre style="background: #f1f1f1; padding: 10px; border-radius: 5px; overflow-x: auto;">
+# Get JSON response (default)
+curl https://relay.yestr.social/random
+
+# Get 20 profiles as JSON
+curl https://relay.yestr.social/random?count=20
+
+# Get HTML response
+curl -H "Accept: text/html" https://relay.yestr.social/random</pre>
         </div>
     </div>
 </body>
