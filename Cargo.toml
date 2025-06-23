@@ -9,6 +9,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 tokio = { version = "1.40", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors"] }
 
 # Nostr dependencies
 nostr_relay_builder = { git = "https://github.com/verse-pbc/nostr_relay_builder", rev = "000bb4b", features = ["axum"] }
