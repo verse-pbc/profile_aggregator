@@ -6,6 +6,7 @@ use axum::{
     routing::get,
     Router,
 };
+use heavykeeper::TopK;
 use nostr_relay_builder::{CryptoWorker, RelayBuilder, RelayConfig, RelayDatabase, RelayInfo};
 use nostr_sdk::prelude::*;
 use profile_aggregator::{
@@ -81,116 +82,14 @@ static PROFILE_COUNT: RwLock<usize> = RwLock::new(0);
 // Global cache for random profiles
 static RANDOM_PROFILES_CACHE: RwLock<Vec<ProfileWithRelays>> = RwLock::new(Vec::new());
 
-async fn find_oldest_timestamp(database: &Arc<RelayDatabase>) -> Result<u64> {
-    info!("Finding oldest timestamp using binary search...");
-
-    let scope = nostr_lmdb::Scope::Default;
-    let now = Timestamp::now().as_u64();
-    const YEAR_SECONDS: u64 = 365 * 24 * 60 * 60;
-
-    // Start by going back year by year to find a period with no events
-    let mut years_back = 1;
-    let mut found_empty_period = false;
-    let mut last_year_with_events = 0;
-
-    loop {
-        let until = Timestamp::from(now.saturating_sub((years_back - 1) * YEAR_SECONDS));
-
-        // Use only until to check if any events exist before this timestamp
-        let filter = Filter::new().kind(Kind::Metadata).until(until).limit(1);
-
-        match database.query(vec![filter], &scope).await {
-            Ok(events) => {
-                if events.into_iter().next().is_some() {
-                    // Found events, go back another year
-                    info!("Found events {} years back, going further...", years_back);
-                    last_year_with_events = years_back;
-                    years_back += 1;
-                } else {
-                    // No events before this timestamp
-                    info!("No events found {} years back", years_back);
-                    found_empty_period = true;
-                    break;
-                }
-            }
-            Err(e) => {
-                error!("Error querying for oldest timestamp: {}", e);
-                return Err(e.into());
-            }
-        }
-
-        // Safety limit
-        if years_back > 10 {
-            info!("Reached 10 years back, stopping search");
-            break;
-        }
-    }
-
-    // Now binary search within the period to find the exact oldest timestamp
-    let search_end = now.saturating_sub(last_year_with_events.saturating_sub(1) * YEAR_SECONDS);
-    let search_start = if found_empty_period {
-        now.saturating_sub(years_back * YEAR_SECONDS)
-    } else {
-        0 // If we went back 10 years and still found events, search from beginning of time
-    };
-
-    let mut left = search_start;
-    let mut right = search_end;
-    let mut oldest_found = right;
-
-    info!("Binary searching between {} and {}", left, right);
-
-    while left < right {
-        let mid = left + (right - left) / 2;
-
-        // Check if there are any events before mid timestamp
-        let filter = Filter::new()
-            .kind(Kind::Metadata)
-            .until(Timestamp::from(mid))
-            .limit(1);
-
-        match database.query(vec![filter], &scope).await {
-            Ok(events) => {
-                if let Some(event) = events.into_iter().next() {
-                    // Found an event, so there might be older ones
-                    oldest_found = event.created_at.as_u64();
-                    right = mid;
-                } else {
-                    // No events before mid, search in the right half
-                    left = mid + 1;
-                }
-            }
-            Err(e) => {
-                error!("Error during binary search: {}", e);
-                return Err(e.into());
-            }
-        }
-
-        // Precision threshold - stop when we're within a day
-        if right - left < 86400 {
-            break;
-        }
-    }
-
-    // Do one final query to get the actual oldest event
-    let final_filter = Filter::new()
-        .kind(Kind::Metadata)
-        .until(Timestamp::from(oldest_found + 86400)) // Add a day buffer
-        .limit(1);
-
-    if let Ok(events) = database.query(vec![final_filter], &scope).await {
-        if let Some(event) = events.into_iter().next() {
-            oldest_found = event.created_at.as_u64();
-        }
-    }
-
-    let span_days = (now - oldest_found) / 86400;
-    info!(
-        "Oldest timestamp found: {} ({} days ago)",
-        oldest_found, span_days
+// Global TopK tracker for shown profiles
+lazy_static::lazy_static! {
+    static ref SHOWN_PROFILES: RwLock<TopK<Vec<u8>>> = RwLock::new(
+        // Track top 1000 most shown profiles
+        // width=5000, depth=4 for good accuracy
+        // decay=0.9 for gradual forgetting
+        TopK::new(1000, 5000, 4, 0.9)
     );
-
-    Ok(oldest_found)
 }
 
 /// Update the cached profile count
@@ -203,87 +102,149 @@ async fn update_profile_count(
     Ok(count)
 }
 
-/// Refresh the random profiles cache with 10,000 items
+/// Refresh the random profiles cache with up to 10,000 items using window-based queries
 async fn refresh_random_profiles_cache(database: Arc<RelayDatabase>) -> Result<()> {
     info!("Refreshing random profiles cache...");
 
-    // Get cached oldest timestamp
-    let oldest_timestamp = match OLDEST_TIMESTAMP.read().unwrap().as_ref() {
-        Some(&ts) => ts,
-        None => {
-            error!("Cannot refresh cache: oldest timestamp not initialized");
+    const TARGET_COUNT: usize = 10_000;
+    let scope = nostr_lmdb::Scope::Default;
+    let now = Timestamp::now();
+
+    // Get the current oldest timestamp (if we have one)
+    let cached_oldest = *OLDEST_TIMESTAMP.read().unwrap();
+
+    // Decide on the window to query
+    let (until_timestamp, is_initial) = if cached_oldest.is_none() {
+        // First time - start with the most recent window
+        (now, true)
+    } else {
+        // For refresh, pick a random window
+        use rand::Rng;
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        let oldest = cached_oldest.unwrap();
+        let random_ts = rng.gen_range(oldest..=now.as_u64());
+        (Timestamp::from(random_ts), false)
+    };
+
+    // Query a window of up to 10,000 profiles
+    let filter = Filter::new()
+        .kind(Kind::Metadata)
+        .until(until_timestamp)
+        .limit(TARGET_COUNT);
+
+    let mut profiles = match database.query(vec![filter], &scope).await {
+        Ok(events) => events.into_iter().collect::<Vec<_>>(),
+        Err(e) => {
+            error!("Error querying profiles for cache: {}", e);
             return Ok(());
         }
     };
 
-    use rand::Rng;
-    use rand::SeedableRng;
-    let mut rng = rand::rngs::StdRng::from_entropy();
+    info!(
+        "Fetched {} profiles from window until={}",
+        profiles.len(),
+        until_timestamp.as_u64()
+    );
 
-    let scope = nostr_lmdb::Scope::Default;
-    let mut selected_profiles = Vec::new();
-    let mut attempts = 0;
-    const TARGET_COUNT: usize = 10_000;
-    let max_attempts = TARGET_COUNT * 3;
+    // If this is the initial load and we got exactly 10,000, fetch one more window to expand our range
+    if is_initial && profiles.len() == TARGET_COUNT {
+        // Get the oldest from current batch
+        let current_oldest = profiles
+            .last()
+            .map(|p| p.created_at.as_u64())
+            .unwrap_or(now.as_u64());
 
-    let now = Timestamp::now().as_u64();
-
-    // Collect random profiles
-    while selected_profiles.len() < TARGET_COUNT && attempts < max_attempts {
-        attempts += 1;
-
-        // Pick a random timestamp between oldest and now
-        let random_timestamp = rng.gen_range(oldest_timestamp..=now);
-
-        // Query for the most recent profile before this timestamp
+        // Fetch ONE more window to expand our range
         let filter = Filter::new()
             .kind(Kind::Metadata)
-            .until(Timestamp::from(random_timestamp))
-            .limit(1);
+            .until(Timestamp::from(current_oldest))
+            .limit(TARGET_COUNT);
 
         match database.query(vec![filter], &scope).await {
             Ok(events) => {
-                if let Some(event) = events.into_iter().next() {
-                    // Check if we already have this profile (avoid duplicates)
-                    if !selected_profiles
-                        .iter()
-                        .any(|e: &Event| e.pubkey == event.pubkey)
-                    {
-                        selected_profiles.push(event);
+                let older_batch: Vec<_> = events.into_iter().collect();
+                if !older_batch.is_empty() {
+                    // Update oldest timestamp based on this batch
+                    if let Some(oldest_event) = older_batch.last() {
+                        let new_oldest = oldest_event.created_at.as_u64();
+                        *OLDEST_TIMESTAMP.write().unwrap() = Some(new_oldest);
+                        info!("Expanded range: found older timestamp {} from second window with {} profiles", 
+                              new_oldest, older_batch.len());
                     }
+                    // Add the older profiles to our collection
+                    profiles.extend(older_batch);
+                    info!("Total profiles after combining windows: {}", profiles.len());
                 }
             }
             Err(e) => {
-                error!("Error querying random profile for cache: {}", e);
+                error!("Error fetching second window: {}", e);
+            }
+        }
+    } else if profiles.len() < TARGET_COUNT && cached_oldest.is_some() {
+        // We got fewer than expected, maybe we need to supplement from the most recent window
+        let recent_filter = Filter::new()
+            .kind(Kind::Metadata)
+            .until(now)
+            .limit(TARGET_COUNT - profiles.len());
+
+        if let Ok(events) = database.query(vec![recent_filter], &scope).await {
+            let recent_profiles: Vec<_> = events
+                .into_iter()
+                .filter(|e| !profiles.iter().any(|p| p.pubkey == e.pubkey))
+                .collect();
+            let supplement_count = recent_profiles.len();
+            profiles.extend(recent_profiles);
+            info!("Supplemented with {} recent profiles", supplement_count);
+        }
+    }
+
+    // Update oldest timestamp if we found an older one
+    if let Some(oldest_in_batch) = profiles.last() {
+        let batch_oldest = oldest_in_batch.created_at.as_u64();
+        let mut oldest = OLDEST_TIMESTAMP.write().unwrap();
+        if oldest.is_none() || batch_oldest < oldest.unwrap() {
+            *oldest = Some(batch_oldest);
+            info!("Updated oldest timestamp to: {}", batch_oldest);
+        }
+    }
+
+    // Remove duplicates based on pubkey
+    let mut seen_pubkeys = std::collections::HashSet::new();
+    profiles.retain(|p| seen_pubkeys.insert(p.pubkey));
+
+    info!(
+        "Fetching relay lists for {} unique profiles",
+        profiles.len()
+    );
+
+    // Batch fetch relay lists - fetch all at once instead of one by one
+    let authors: Vec<_> = profiles.iter().map(|p| p.pubkey).collect();
+    let relay_filter = Filter::new()
+        .authors(authors)
+        .kinds(vec![Kind::Custom(10002), Kind::Custom(10050)]);
+
+    let mut relay_events_map: std::collections::HashMap<PublicKey, (Option<Event>, Option<Event>)> =
+        std::collections::HashMap::new();
+
+    if let Ok(relay_events) = database.query(vec![relay_filter], &scope).await {
+        for event in relay_events {
+            let entry = relay_events_map.entry(event.pubkey).or_insert((None, None));
+            match event.kind.as_u16() {
+                10002 => entry.0 = Some(event),
+                10050 => entry.1 = Some(event),
+                _ => {}
             }
         }
     }
 
-    info!(
-        "Selected {} random profiles for cache after {} attempts",
-        selected_profiles.len(),
-        attempts
-    );
-
-    // Now fetch relay lists for each profile
+    // Build results with relay lists
     let mut results = Vec::new();
-    for profile in selected_profiles {
-        let relay_filter = Filter::new()
-            .author(profile.pubkey)
-            .kinds(vec![Kind::Custom(10002), Kind::Custom(10050)]);
-
-        let mut relay_list = None;
-        let mut dm_relay_list = None;
-
-        if let Ok(relay_events) = database.query(vec![relay_filter], &scope).await {
-            for event in relay_events {
-                match event.kind.as_u16() {
-                    10002 => relay_list = Some(event),
-                    10050 => dm_relay_list = Some(event),
-                    _ => {}
-                }
-            }
-        }
+    for profile in profiles {
+        let (relay_list, dm_relay_list) = relay_events_map
+            .get(&profile.pubkey)
+            .cloned()
+            .unwrap_or((None, None));
 
         results.push(ProfileWithRelays {
             profile,
@@ -326,13 +287,70 @@ async fn random_profiles_handler_impl(
         return Json::<Vec<ProfileWithRelays>>(vec![]).into_response();
     }
 
-    // Randomly sample from the cache
+    // Get the set of frequently shown profiles
+    let shown_tracker = SHOWN_PROFILES.read().unwrap();
+    let frequently_shown: std::collections::HashSet<Vec<u8>> = shown_tracker
+        .list()
+        .into_iter()
+        .map(|node| node.item)
+        .collect();
+    drop(shown_tracker);
+
+    // Build indices for rarely shown and frequently shown profiles
+    let mut rarely_shown_indices = Vec::new();
+    let mut frequently_shown_indices = Vec::new();
+
+    for (idx, profile) in cache.iter().enumerate() {
+        if frequently_shown.contains(profile.profile.pubkey.to_bytes().as_slice()) {
+            frequently_shown_indices.push(idx);
+        } else {
+            rarely_shown_indices.push(idx);
+        }
+    }
+
+    info!(
+        "Cache partitioned: {} rarely shown, {} frequently shown",
+        rarely_shown_indices.len(),
+        frequently_shown_indices.len()
+    );
+
+    // Randomly sample from the cache with priority to rarely shown
     use rand::seq::SliceRandom;
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::from_entropy();
 
-    let mut results: Vec<ProfileWithRelays> =
-        cache.choose_multiple(&mut rng, count).cloned().collect();
+    let mut results = Vec::new();
+
+    // First, take from rarely shown profiles
+    let rarely_shown_sample_indices: Vec<_> = rarely_shown_indices
+        .choose_multiple(&mut rng, count.min(rarely_shown_indices.len()))
+        .copied()
+        .collect();
+
+    for idx in rarely_shown_sample_indices {
+        results.push(cache[idx].clone());
+    }
+
+    // If we need more, take from frequently shown
+    if results.len() < count && !frequently_shown_indices.is_empty() {
+        let remaining = count - results.len();
+        let frequently_shown_sample_indices: Vec<_> = frequently_shown_indices
+            .choose_multiple(&mut rng, remaining.min(frequently_shown_indices.len()))
+            .copied()
+            .collect();
+
+        for idx in frequently_shown_sample_indices {
+            results.push(cache[idx].clone());
+        }
+    }
+
+    // Track what we're showing
+    {
+        let mut shown_tracker = SHOWN_PROFILES.write().unwrap();
+        for profile in &results {
+            shown_tracker.add(profile.profile.pubkey.to_bytes().to_vec());
+        }
+    }
 
     // Sort results by created_at in descending order (most recent first)
     results.sort_by(|a, b| b.profile.created_at.cmp(&a.profile.created_at));
@@ -382,16 +400,7 @@ async fn main() -> Result<()> {
 
     let database = Arc::new(RelayDatabase::new(&database_path, crypto_sender)?);
 
-    // Find and cache the oldest timestamp for random selection
-    match find_oldest_timestamp(&database).await {
-        Ok(oldest) => {
-            *OLDEST_TIMESTAMP.write().unwrap() = Some(oldest);
-        }
-        Err(e) => {
-            error!("Failed to find oldest timestamp: {}", e);
-            // Continue anyway - random endpoint will return empty results
-        }
-    }
+    // The oldest timestamp will be discovered during the first cache refresh
 
     // Initialize and periodically update profile count
     let database_clone = database.clone();
@@ -430,6 +439,26 @@ async fn main() -> Result<()> {
             }
             // Wait 1 minute before next refresh
             tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+
+    // Periodically log the most shown profiles
+    tokio::spawn(async move {
+        loop {
+            // Wait 5 minutes
+            tokio::time::sleep(Duration::from_secs(300)).await;
+
+            let shown_tracker = SHOWN_PROFILES.read().unwrap();
+            let top_profiles = shown_tracker.list();
+            if !top_profiles.is_empty() {
+                info!("Top 10 most shown profiles:");
+                for (i, node) in top_profiles.iter().take(10).enumerate() {
+                    if let Ok(pubkey_bytes) = <[u8; 32]>::try_from(node.item.as_slice()) {
+                        let pubkey = PublicKey::from_byte_array(pubkey_bytes);
+                        info!("  {}. {} - shown {} times", i + 1, pubkey, node.count);
+                    }
+                }
+            }
         }
     });
 
