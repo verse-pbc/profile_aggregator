@@ -65,7 +65,7 @@ fn default_count() -> usize {
     12
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ProfileWithRelays {
     profile: Event,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,6 +78,8 @@ struct ProfileWithRelays {
 static OLDEST_TIMESTAMP: RwLock<Option<u64>> = RwLock::new(None);
 // Global state for profile count
 static PROFILE_COUNT: RwLock<usize> = RwLock::new(0);
+// Global cache for random profiles
+static RANDOM_PROFILES_CACHE: RwLock<Vec<ProfileWithRelays>> = RwLock::new(Vec::new());
 
 async fn find_oldest_timestamp(database: &Arc<RelayDatabase>) -> Result<u64> {
     info!("Finding oldest timestamp using binary search...");
@@ -201,21 +203,16 @@ async fn update_profile_count(
     Ok(count)
 }
 
-async fn random_profiles_handler_impl(
-    database: Arc<RelayDatabase>,
-    params: RandomQuery,
-    headers: HeaderMap,
-) -> Response {
-    // Cap the count at 500
-    let count = params.count.min(500);
-    info!("Random profiles requested: count={}", count);
+/// Refresh the random profiles cache with 10,000 items
+async fn refresh_random_profiles_cache(database: Arc<RelayDatabase>) -> Result<()> {
+    info!("Refreshing random profiles cache...");
 
     // Get cached oldest timestamp
     let oldest_timestamp = match OLDEST_TIMESTAMP.read().unwrap().as_ref() {
         Some(&ts) => ts,
         None => {
-            info!("Oldest timestamp not initialized");
-            return Json::<Vec<ProfileWithRelays>>(vec![]).into_response();
+            error!("Cannot refresh cache: oldest timestamp not initialized");
+            return Ok(());
         }
     };
 
@@ -226,12 +223,13 @@ async fn random_profiles_handler_impl(
     let scope = nostr_lmdb::Scope::Default;
     let mut selected_profiles = Vec::new();
     let mut attempts = 0;
-    let max_attempts = count * 3; // Allow more attempts for larger counts
+    const TARGET_COUNT: usize = 10_000;
+    let max_attempts = TARGET_COUNT * 3;
 
     let now = Timestamp::now().as_u64();
 
-    // Collect random profiles one by one
-    while selected_profiles.len() < count && attempts < max_attempts {
+    // Collect random profiles
+    while selected_profiles.len() < TARGET_COUNT && attempts < max_attempts {
         attempts += 1;
 
         // Pick a random timestamp between oldest and now
@@ -256,13 +254,13 @@ async fn random_profiles_handler_impl(
                 }
             }
             Err(e) => {
-                error!("Error querying random profile: {}", e);
+                error!("Error querying random profile for cache: {}", e);
             }
         }
     }
 
     info!(
-        "Selected {} random profiles after {} attempts",
+        "Selected {} random profiles for cache after {} attempts",
         selected_profiles.len(),
         attempts
     );
@@ -277,7 +275,6 @@ async fn random_profiles_handler_impl(
         let mut relay_list = None;
         let mut dm_relay_list = None;
 
-        let scope = nostr_lmdb::Scope::Default;
         if let Ok(relay_events) = database.query(vec![relay_filter], &scope).await {
             for event in relay_events {
                 match event.kind.as_u16() {
@@ -295,8 +292,52 @@ async fn random_profiles_handler_impl(
         });
     }
 
+    // Sort by created_at in descending order
+    results.sort_by(|a, b| b.profile.created_at.cmp(&a.profile.created_at));
+
+    // Update the cache
+    {
+        let mut cache = RANDOM_PROFILES_CACHE.write().unwrap();
+        *cache = results;
+    }
+
+    info!(
+        "Random profiles cache refreshed with {} profiles",
+        RANDOM_PROFILES_CACHE.read().unwrap().len()
+    );
+
+    Ok(())
+}
+
+async fn random_profiles_handler_impl(
+    _database: Arc<RelayDatabase>,
+    params: RandomQuery,
+    headers: HeaderMap,
+) -> Response {
+    // Cap the count at 500
+    let count = params.count.min(500);
+    info!("Random profiles requested: count={}", count);
+
+    // Get profiles from cache
+    let cache = RANDOM_PROFILES_CACHE.read().unwrap();
+
+    if cache.is_empty() {
+        info!("Cache is empty, returning empty response");
+        return Json::<Vec<ProfileWithRelays>>(vec![]).into_response();
+    }
+
+    // Randomly sample from the cache
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::from_entropy();
+
+    let mut results: Vec<ProfileWithRelays> =
+        cache.choose_multiple(&mut rng, count).cloned().collect();
+
     // Sort results by created_at in descending order (most recent first)
     results.sort_by(|a, b| b.profile.created_at.cmp(&a.profile.created_at));
+
+    info!("Returning {} profiles from cache", results.len());
 
     // Check Accept header to determine response type
     let accept = headers
@@ -365,8 +406,30 @@ async fn main() -> Result<()> {
                     error!("Failed to update profile count: {}", e);
                 }
             }
-            // Wait 5 minutes before next update
-            tokio::time::sleep(Duration::from_secs(300)).await;
+            // Wait 1 minute before next update
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+
+    // Initialize random profiles cache
+    let database_clone = database.clone();
+    info!("Initializing random profiles cache...");
+    if let Err(e) = refresh_random_profiles_cache(database_clone.clone()).await {
+        error!("Failed to initialize random profiles cache: {}", e);
+    }
+
+    // Periodically refresh the random profiles cache
+    let database_clone = database.clone();
+    tokio::spawn(async move {
+        // Wait 1 minute before first refresh (since we just initialized)
+        tokio::time::sleep(Duration::from_secs(60)).await;
+
+        loop {
+            if let Err(e) = refresh_random_profiles_cache(database_clone.clone()).await {
+                error!("Failed to refresh random profiles cache: {}", e);
+            }
+            // Wait 1 minute before next refresh
+            tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
 
