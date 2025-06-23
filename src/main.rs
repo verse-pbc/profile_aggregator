@@ -22,6 +22,39 @@ use tokio_util::task::TaskTracker;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
 
+// HTML templates
+static INDEX_TEMPLATE: &str = include_str!("../templates/index.html");
+static RANDOM_PROFILES_TEMPLATE: &str = include_str!("../templates/random_profiles.html");
+
+fn render_index_html(info: &RelayInfo, websocket_url: &str) -> String {
+    let supported_nips = info
+        .supported_nips
+        .iter()
+        .map(|nip| format!(r#"<span class="nip">NIP-{:02}</span>"#, nip))
+        .collect::<Vec<_>>()
+        .join("\n                    ");
+
+    INDEX_TEMPLATE
+        .replace("{title}", &info.name)
+        .replace("{name}", &info.name)
+        .replace("{description}", &info.description)
+        .replace("{websocket_url}", websocket_url)
+        .replace("{pubkey}", &info.pubkey)
+        .replace("{contact}", &info.contact)
+        .replace("{software}", &info.software)
+        .replace("{version}", &info.version)
+        .replace("{supported_nips}", &supported_nips)
+}
+
+fn render_random_profiles_html(profiles: &[ProfileWithRelays]) -> String {
+    let profiles_json = serde_json::to_string(profiles).unwrap_or_default();
+    let profile_count = *PROFILE_COUNT.read().unwrap();
+
+    RANDOM_PROFILES_TEMPLATE
+        .replace("{profile_count}", &profile_count.to_string())
+        .replace("{profiles_json}", &profiles_json)
+}
+
 #[derive(Deserialize)]
 struct RandomQuery {
     #[serde(default = "default_count")]
@@ -270,364 +303,11 @@ async fn random_profiles_handler_impl(
 
     if accept.contains("text/html") {
         // Return HTML response
-        Html(render_profiles_html(&results)).into_response()
+        Html(render_random_profiles_html(&results)).into_response()
     } else {
         // Return JSON response
         Json(results).into_response()
     }
-}
-
-fn render_profiles_html(profiles: &[ProfileWithRelays]) -> String {
-    let profiles_json = serde_json::to_string(profiles).unwrap_or_default();
-    let profile_count = *PROFILE_COUNT.read().unwrap();
-
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Random Nostr Profiles</title>
-    <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-        
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: #0a0a0a;
-            color: #e0e0e0;
-            line-height: 1.6;
-        }}
-        
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-        }}
-        
-        h1 {{
-            text-align: center;
-            margin-bottom: 40px;
-            color: #fff;
-            font-size: 2.5rem;
-        }}
-        
-        .profiles-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-            gap: 30px;
-        }}
-        
-        .profile-card {{
-            background: #1a1a1a;
-            border-radius: 12px;
-            padding: 24px;
-            border: 1px solid #333;
-            transition: transform 0.2s, box-shadow 0.2s;
-            cursor: pointer;
-            position: relative;
-        }}
-        
-        .profile-card:hover {{
-            transform: translateY(-4px);
-            box-shadow: 0 8px 32px rgba(140, 80, 255, 0.1);
-            border-color: #8c50ff;
-        }}
-        
-        .profile-header {{
-            display: flex;
-            align-items: center;
-            margin-bottom: 16px;
-        }}
-        
-        .profile-image {{
-            width: 80px;
-            height: 80px;
-            border-radius: 50%;
-            object-fit: cover;
-            margin-right: 16px;
-            border: 3px solid #333;
-        }}
-        
-        .profile-info {{
-            flex: 1;
-            min-width: 0; /* Allow flex item to shrink below content size */
-        }}
-        
-        .profile-name {{
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: #fff;
-            margin-bottom: 4px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }}
-        
-        .profile-pubkey {{
-            font-size: 0.875rem;
-            color: #666;
-            font-family: monospace;
-            word-break: break-all;
-        }}
-        
-        .profile-updated {{
-            font-size: 0.75rem;
-            color: #555;
-            margin-top: 4px;
-        }}
-        
-        .profile-bio {{
-            margin-bottom: 16px;
-            color: #ccc;
-            overflow: hidden;
-            display: -webkit-box;
-            -webkit-line-clamp: 3;
-            -webkit-box-orient: vertical;
-        }}
-        
-        .profile-metadata {{
-            margin-bottom: 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }}
-        
-        .metadata-item {{
-            font-size: 0.875rem;
-            color: #999;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }}
-        
-        .metadata-icon {{
-            flex-shrink: 0;
-            font-size: 1rem;
-        }}
-        
-        .metadata-item a {{
-            color: #8c50ff;
-            text-decoration: none;
-            word-break: break-all;
-            transition: color 0.2s;
-        }}
-        
-        .metadata-item a:hover {{
-            color: #a970ff;
-            text-decoration: underline;
-        }}
-        
-        .relay-section {{
-            margin-top: 16px;
-            padding-top: 16px;
-            border-top: 1px solid #333;
-        }}
-        
-        .relay-title {{
-            font-size: 0.875rem;
-            color: #8c50ff;
-            font-weight: 600;
-            margin-bottom: 8px;
-        }}
-        
-        .relay-list {{
-            font-size: 0.75rem;
-            color: #999;
-            font-family: monospace;
-            max-height: 100px;
-            overflow-y: auto;
-        }}
-        
-        .relay-item {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 2px 0;
-        }}
-        
-        .relay-url {{
-            flex: 1;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }}
-        
-        .relay-marker {{
-            color: #666;
-            font-size: 0.7rem;
-            margin-left: 8px;
-            flex-shrink: 0;
-        }}
-        
-        .relay-list::-webkit-scrollbar {{
-            width: 4px;
-        }}
-        
-        .relay-list::-webkit-scrollbar-track {{
-            background: #333;
-        }}
-        
-        .relay-list::-webkit-scrollbar-thumb {{
-            background: #666;
-            border-radius: 2px;
-        }}
-        
-        .no-relays {{
-            color: #666;
-            font-style: italic;
-            font-size: 0.75rem;
-        }}
-        
-        .loading {{
-            text-align: center;
-            padding: 40px;
-            color: #666;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Random Nostr Profiles</h1>
-        <p style="text-align: center; color: #999; margin-top: -20px; margin-bottom: 30px; font-size: 0.9rem;">Total profiles in database: {profile_count}</p>
-        <div id="profiles-container" class="profiles-grid">
-            <div class="loading">Loading profiles...</div>
-        </div>
-    </div>
-    
-    <script src="https://unpkg.com/nostr-tools@2.5.2/lib/nostr.bundle.js"></script>
-    <script>
-        const {{ nip19 }} = window.NostrTools;
-        const profilesData = {profiles_json};
-        
-        function truncateNpub(npub) {{
-            return npub.slice(0, 12) + '...' + npub.slice(-8);
-        }}
-        
-        function truncateUrl(url) {{
-            if (url.length <= 30) return url;
-            return url.slice(0, 25) + '...' + url.slice(-5);
-        }}
-        
-        function formatWebsite(website) {{
-            // Remove protocol for display
-            return website.replace(/^https?:\/\//, '').replace(/\/$/, '');
-        }}
-        
-        function formatTimestamp(timestamp) {{
-            const date = new Date(timestamp * 1000);
-            const now = new Date();
-            const diffMs = now - date;
-            const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-            
-            if (diffDays === 0) {{
-                return 'Updated today';
-            }} else if (diffDays === 1) {{
-                return 'Updated yesterday';
-            }} else if (diffDays < 7) {{
-                return `Updated ${{diffDays}} days ago`;
-            }} else if (diffDays < 30) {{
-                const weeks = Math.floor(diffDays / 7);
-                return `Updated ${{weeks}} week${{weeks > 1 ? 's' : ''}} ago`;
-            }} else if (diffDays < 365) {{
-                const months = Math.floor(diffDays / 30);
-                return `Updated ${{months}} month${{months > 1 ? 's' : ''}} ago`;
-            }} else {{
-                const years = Math.floor(diffDays / 365);
-                return `Updated ${{years}} year${{years > 1 ? 's' : ''}} ago`;
-            }}
-        }}
-        
-        function parseRelays(event) {{
-            if (!event) return [];
-            try {{
-                const relays = [];
-                for (const tag of event.tags) {{
-                    if (tag[0] === 'r' && tag[1]) {{
-                        const url = tag[1];
-                        const marker = tag[2]; // 'read', 'write', or undefined (both)
-                        relays.push({{ url, marker }});
-                    }}
-                }}
-                return relays;
-            }} catch (e) {{
-                return [];
-            }}
-        }}
-        
-        function renderProfiles() {{
-            const container = document.getElementById('profiles-container');
-            container.innerHTML = '';
-            
-            profilesData.forEach(item => {{
-                const profile = item.profile;
-                let metadata;
-                try {{
-                    metadata = JSON.parse(profile.content);
-                }} catch (e) {{
-                    metadata = {{}};
-                }}
-                
-                const name = metadata.display_name || metadata.name || 'Anonymous';
-                const picture = metadata.picture || '';
-                const about = metadata.about || '';
-                const website = metadata.website || '';
-                const nip05 = metadata.nip05 || '';
-                const lud16 = metadata.lud16 || '';
-                const npub = nip19.npubEncode(profile.pubkey);
-                
-                const relays = parseRelays(item.relay_list);
-                const dmRelays = parseRelays(item.dm_relay_list);
-                
-                const card = document.createElement('div');
-                card.className = 'profile-card';
-                card.onclick = () => window.open(`https://njump.me/${{npub}}`, '_blank');
-                
-                card.innerHTML = `
-                    <div class="profile-header">
-                        ${{picture ? `<img src="${{picture}}" alt="${{name}}" class="profile-image" onerror="this.style.display='none'">` : ''}}
-                        <div class="profile-info">
-                            <div class="profile-name">${{name}}</div>
-                            <div class="profile-pubkey">${{truncateNpub(npub)}}</div>
-                            <div class="profile-updated">${{formatTimestamp(profile.created_at)}}</div>
-                        </div>
-                    </div>
-                    ${{about ? `<div class="profile-bio">${{about}}</div>` : ''}}
-                    <div class="profile-metadata">
-                        ${{nip05 ? `<div class="metadata-item"><span class="metadata-icon">✓</span> ${{nip05}}</div>` : ''}}
-                        ${{website ? `<div class="metadata-item"><span class="metadata-icon">🔗</span> <a href="${{website.startsWith('http') ? website : 'https://' + website}}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${{formatWebsite(website)}}</a></div>` : ''}}
-                        ${{lud16 ? `<div class="metadata-item"><span class="metadata-icon">⚡</span> ${{lud16}}</div>` : ''}}
-                    </div>
-                    ${{relays.length > 0 ? `
-                        <div class="relay-section">
-                            <div class="relay-title">Relay List (NIP-65)</div>
-                            <div class="relay-list">${{relays.map(r => {{
-                                const marker = r.marker ? ` [${{r.marker}}]` : ' [read/write]';
-                                return `<div class="relay-item"><span class="relay-url">${{r.url}}</span><span class="relay-marker">${{marker}}</span></div>`;
-                            }}).join('')}}</div>
-                        </div>
-                    ` : '<div class="no-relays">No relay lists published</div>'}}
-                    ${{dmRelays.length > 0 ? `
-                        <div class="relay-section">
-                            <div class="relay-title">DM Inbox Relays (NIP-17)</div>
-                            <div class="relay-list">${{dmRelays.map(r => r.url).join('<br>')}}</div>
-                        </div>
-                    ` : ''}}
-                `;
-                
-                container.appendChild(card);
-            }});
-        }}
-        
-        // Render profiles on load
-        renderProfiles();
-    </script>
-</body>
-</html>"#
-    )
 }
 
 #[tokio::main]
@@ -738,8 +418,7 @@ async fn main() -> Result<()> {
         name: "Profile Aggregator Relay".to_string(),
         description: "A relay that aggregates and filters user profiles".to_string(),
         pubkey: config.keys.public_key().to_hex(),
-        contact: std::env::var("RELAY_CONTACT")
-            .unwrap_or_else(|_| "admin@relay.example".to_string()),
+        contact: std::env::var("RELAY_CONTACT").unwrap_or_else(|_| "daniel@nos.social".to_string()),
         supported_nips: vec![1, 11],
         software: "profile_aggregator".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -779,166 +458,8 @@ async fn main() -> Result<()> {
                 }
 
                 // Otherwise return HTML
-                let html = format!(
-                    r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{}</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            background: #f5f5f5;
-        }}
-        .container {{
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            color: #2c3e50;
-            border-bottom: 2px solid #3498db;
-            padding-bottom: 10px;
-        }}
-        .info-grid {{
-            display: grid;
-            grid-template-columns: auto 1fr;
-            gap: 15px;
-            margin: 20px 0;
-        }}
-        .label {{
-            font-weight: bold;
-            color: #555;
-        }}
-        .value {{
-            color: #333;
-            word-break: break-all;
-        }}
-        .features {{
-            margin-top: 30px;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 8px;
-        }}
-        .features h2 {{
-            margin-top: 0;
-            color: #2c3e50;
-        }}
-        .link-button {{
-            display: inline-block;
-            margin: 10px 10px 10px 0;
-            padding: 10px 20px;
-            background: #3498db;
-            color: white;
-            text-decoration: none;
-            border-radius: 5px;
-            transition: background 0.3s;
-        }}
-        .link-button:hover {{
-            background: #2980b9;
-        }}
-        code {{
-            background: #f1f1f1;
-            padding: 2px 5px;
-            border-radius: 3px;
-            font-family: monospace;
-        }}
-        .supported-nips {{
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-        }}
-        .nip {{
-            background: #e8f4f8;
-            padding: 5px 10px;
-            border-radius: 5px;
-            font-size: 0.9em;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>{}</h1>
-        <p>{}</p>
-        
-        <div class="info-grid">
-            <div class="label">WebSocket:</div>
-            <div class="value">{}</div>
-            
-            <div class="label">Pubkey:</div>
-            <div class="value">{}</div>
-            
-            <div class="label">Contact:</div>
-            <div class="value">{}</div>
-            
-            <div class="label">Software:</div>
-            <div class="value">{} v{}</div>
-            
-            <div class="label">Supported NIPs:</div>
-            <div class="value">
-                <div class="supported-nips">
-                    {}
-                </div>
-            </div>
-        </div>
-        
-        <div class="features">
-            <h2>Features</h2>
-            <p>This relay aggregates and validates high-quality Nostr user profiles with the following requirements:</p>
-            <ul>
-                <li>Must have a name and bio</li>
-                <li>Profile picture must be at least 300x600 pixels</li>
-                <li>User must have published at least one text note</li>
-                <li>Excludes bridge accounts (mostr, ActivityPub)</li>
-            </ul>
-            
-            <h3>API Endpoints</h3>
-            <p><strong>/random</strong> - Get random validated profiles</p>
-            <ul>
-                <li>Query parameter: <code>?count=N</code> (default: 12, max: 500)</li>
-                <li>Returns JSON by default</li>
-                <li>Returns HTML gallery if Accept header contains "text/html"</li>
-            </ul>
-            
-            <div style="margin-top: 20px;">
-                <a href="/random" class="link-button">View Random Profiles</a>
-            </div>
-            
-            <h3>Example API Usage</h3>
-            <pre style="background: #f1f1f1; padding: 10px; border-radius: 5px; overflow-x: auto;">
-# Get JSON response (default)
-curl https://relay.yestr.social/random
-
-# Get 20 profiles as JSON
-curl https://relay.yestr.social/random?count=20
-
-# Get HTML response
-curl -H "Accept: text/html" https://relay.yestr.social/random</pre>
-        </div>
-    </div>
-</body>
-</html>"#,
-                    info.name,
-                    info.name,
-                    info.description,
-                    url.replace("ws://", "wss://"),
-                    info.pubkey,
-                    info.contact,
-                    info.software,
-                    info.version,
-                    info.supported_nips
-                        .iter()
-                        .map(|nip| format!(r#"<span class="nip">NIP-{:02}</span>"#, nip))
-                        .collect::<Vec<_>>()
-                        .join("")
-                );
+                let websocket_url = url.replace("ws://", "wss://");
+                let html = render_index_html(&info, &websocket_url);
 
                 Html(html).into_response()
             }

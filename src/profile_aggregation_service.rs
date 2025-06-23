@@ -95,7 +95,7 @@ impl ProfileAggregationService {
         config: ProfileAggregationConfig,
         filter: Arc<ProfileQualityFilter>,
         database: Arc<RelayDatabase>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Load or create state
         let state = match Self::load_state(&config.state_file) {
             Ok(state) => Arc::new(RwLock::new(state)),

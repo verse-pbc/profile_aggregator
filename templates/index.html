@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }
+        .info-grid {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .label {
+            font-weight: bold;
+            color: #555;
+        }
+        .value {
+            color: #333;
+            word-break: break-all;
+        }
+        .features {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .features h2 {
+            margin-top: 0;
+            color: #2c3e50;
+        }
+        .link-button {
+            display: inline-block;
+            margin: 10px 10px 10px 0;
+            padding: 10px 20px;
+            background: #3498db;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            transition: background 0.3s;
+        }
+        .link-button:hover {
+            background: #2980b9;
+        }
+        code {
+            background: #f1f1f1;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        .supported-nips {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .nip {
+            background: #e8f4f8;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>{name}</h1>
+        <p>{description}</p>
+        
+        <div class="info-grid">
+            <div class="label">WebSocket:</div>
+            <div class="value">{websocket_url}</div>
+            
+            <div class="label">Pubkey:</div>
+            <div class="value">{pubkey}</div>
+            
+            <div class="label">Contact:</div>
+            <div class="value">{contact}</div>
+            
+            <div class="label">Software:</div>
+            <div class="value">{software} v{version}</div>
+            
+            <div class="label">Supported NIPs:</div>
+            <div class="value">
+                <div class="supported-nips">
+                    {supported_nips}
+                </div>
+            </div>
+        </div>
+        
+        <div class="features">
+            <h2>Features</h2>
+            <p>This relay aggregates and validates high-quality Nostr user profiles with the following requirements:</p>
+            <ul>
+                <li>Must have a name and bio</li>
+                <li>Profile picture must be at least 300x600 pixels</li>
+                <li>User must have published at least one text note</li>
+                <li>Excludes bridge accounts (mostr, ActivityPub)</li>
+            </ul>
+            
+            <h3>API Endpoints</h3>
+            <p><strong>/random</strong> - Get random validated profiles</p>
+            <ul>
+                <li>Query parameter: <code>?count=N</code> (default: 12, max: 500)</li>
+                <li>Returns JSON by default</li>
+                <li>Returns HTML gallery if Accept header contains "text/html"</li>
+            </ul>
+            
+            <a href="/random" class="link-button">View Random Profiles</a>
+            <a href="/random?count=50" class="link-button">View 50 Random Profiles</a>
+        </div>
+    </div>
+</body>
+</html>
