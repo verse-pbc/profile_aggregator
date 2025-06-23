@@ -404,48 +404,57 @@ async fn random_profiles_handler_impl(
 
 async fn cleanup_empty_picture_profiles(database: Arc<RelayDatabase>) -> Result<()> {
     info!("Starting cleanup of profiles with empty pictures...");
-    
+
     // Query all metadata events
     let filter = Filter::new().kind(Kind::Metadata);
     let scope = nostr_lmdb::Scope::Default;
     let events = database.query(vec![filter], &scope).await?;
-    
+
     let mut deleted_count = 0;
     let mut checked_count = 0;
-    
+
     for event in events {
         checked_count += 1;
-        
+
         // Parse the metadata
-        if let Ok(metadata) = serde_json::from_str::<profile_aggregator::profile_quality_filter::NostrProfileData>(&event.content) {
+        if let Ok(metadata) = serde_json::from_str::<
+            profile_aggregator::profile_quality_filter::NostrProfileData,
+        >(&event.content)
+        {
             // Check if picture is empty or null
-            if metadata.picture.as_ref().map(|p| p.trim().is_empty()).unwrap_or(true) {
-                // Delete this profile
-                let delete_filter = Filter::new()
-                    .kind(Kind::Metadata)
-                    .author(event.pubkey);
-                
+            if metadata
+                .picture
+                .as_ref()
+                .map(|p| p.trim().is_empty())
+                .unwrap_or(true)
+            {
+                // Delete all events from this author
+                let delete_filter = Filter::new().author(event.pubkey);
+
                 if let Err(e) = database.delete(delete_filter, &scope).await {
                     error!("Failed to delete profile {}: {}", event.pubkey, e);
                 } else {
                     deleted_count += 1;
                     if deleted_count % 100 == 0 {
-                        info!("Deleted {} profiles with empty pictures so far...", deleted_count);
+                        info!(
+                            "Deleted {} profiles with empty pictures so far...",
+                            deleted_count
+                        );
                     }
                 }
             }
         }
-        
+
         if checked_count % 1000 == 0 {
             info!("Checked {} profiles...", checked_count);
         }
     }
-    
+
     info!(
         "Cleanup complete: checked {} profiles, deleted {} with empty pictures",
         checked_count, deleted_count
     );
-    
+
     Ok(())
 }
 
