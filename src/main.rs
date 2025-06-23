@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
 // HTML templates
@@ -439,19 +439,26 @@ async fn main() -> Result<()> {
 
     // Initialize and periodically update profile count
     let database_clone = database.clone();
+    let profile_count_token = cancellation_token.clone();
     task_tracker.spawn(async move {
         loop {
-            match update_profile_count(&database_clone).await {
-                Ok(count) => {
-                    *PROFILE_COUNT.write().unwrap() = count;
-                    info!("Updated profile count: {} profiles", count);
+            tokio::select! {
+                _ = profile_count_token.cancelled() => {
+                    info!("Profile count updater cancelled, exiting");
+                    break;
                 }
-                Err(e) => {
-                    error!("Failed to update profile count: {}", e);
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                    match update_profile_count(&database_clone).await {
+                        Ok(count) => {
+                            *PROFILE_COUNT.write().unwrap() = count;
+                            info!("Updated profile count: {} profiles", count);
+                        }
+                        Err(e) => {
+                            error!("Failed to update profile count: {}", e);
+                        }
+                    }
                 }
             }
-            // Wait 1 minute before next update
-            tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
 
@@ -464,33 +471,52 @@ async fn main() -> Result<()> {
 
     // Periodically refresh the random profiles cache
     let database_clone = database.clone();
+    let cache_refresh_token = cancellation_token.clone();
     task_tracker.spawn(async move {
         // Wait 1 minute before first refresh (since we just initialized)
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::select! {
+            _ = cache_refresh_token.cancelled() => {
+                info!("Random profiles cache refresher cancelled, exiting");
+                return;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+        }
 
         loop {
-            if let Err(e) = refresh_random_profiles_cache(database_clone.clone()).await {
-                error!("Failed to refresh random profiles cache: {}", e);
+            tokio::select! {
+                _ = cache_refresh_token.cancelled() => {
+                    info!("Random profiles cache refresher cancelled, exiting");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                    if let Err(e) = refresh_random_profiles_cache(database_clone.clone()).await {
+                        error!("Failed to refresh random profiles cache: {}", e);
+                    }
+                }
             }
-            // Wait 1 minute before next refresh
-            tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
 
     // Periodically log the least shown profiles
+    let least_shown_token = cancellation_token.clone();
     task_tracker.spawn(async move {
         loop {
-            // Wait 5 minutes
-            tokio::time::sleep(Duration::from_secs(300)).await;
-
-            let least_shown_tracker = LEAST_SHOWN_PROFILES.read().unwrap();
-            let least_shown_list = least_shown_tracker.list();
-            if !least_shown_list.is_empty() {
-                info!("Top 10 least shown profiles (high priority for display):");
-                for (i, node) in least_shown_list.iter().take(10).enumerate() {
-                    if let Ok(pubkey_bytes) = <[u8; 32]>::try_from(node.item.as_slice()) {
-                        let pubkey = PublicKey::from_byte_array(pubkey_bytes);
-                        info!("  {}. {} - not shown {} times", i + 1, pubkey, node.count);
+            tokio::select! {
+                _ = least_shown_token.cancelled() => {
+                    info!("Least shown profiles logger cancelled, exiting");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(300)) => {
+                    let least_shown_tracker = LEAST_SHOWN_PROFILES.read().unwrap();
+                    let least_shown_list = least_shown_tracker.list();
+                    if !least_shown_list.is_empty() {
+                        info!("Top 10 least shown profiles (high priority for display):");
+                        for (i, node) in least_shown_list.iter().take(10).enumerate() {
+                            if let Ok(pubkey_bytes) = <[u8; 32]>::try_from(node.item.as_slice()) {
+                                let pubkey = PublicKey::from_byte_array(pubkey_bytes);
+                                info!("  {}. {} - not shown {} times", i + 1, pubkey, node.count);
+                            }
+                        }
                     }
                 }
             }
@@ -657,6 +683,9 @@ async fn main() -> Result<()> {
     println!("- Database: {}", database_path);
     println!("- State: {}", state_file);
 
+    // Close the TaskTracker to prevent new tasks from being spawned
+    task_tracker.close();
+
     // Handle shutdown signal
     let shutdown_token = cancellation_token.clone();
     let shutdown_signal = async move {
@@ -690,10 +719,26 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!("Server stopped, waiting for background tasks...");
+    info!("Server stopped, shutting down services...");
 
-    // Close the TaskTracker to prevent new tasks
-    task_tracker.close();
+    // The database is held by multiple Arc references:
+    // 1. The 3 periodic background tasks (profile count, cache refresh, least shown)
+    // 2. The aggregation service task
+    // 3. The ProfileQualityFilter (held by filter)
+    // 4. The RelayConfig (held by config)
+    // 5. The WebSocket handler (ws_handler)
+    // 6. Inside the HTTP handlers (moved into closures)
+    // Total: ~8 references
+
+    // Since we can't drop all references (some were moved), we'll just log a warning
+    // The database Drop implementation will close channels, causing workers to exit
+    warn!(
+        "Database has {} references remaining. Database shutdown will happen via Drop, \
+        which may not wait for all pending writes to complete.",
+        Arc::strong_count(&database)
+    );
+
+    info!("Waiting for background tasks...");
 
     // Wait for all background tasks to complete
     match tokio::time::timeout(Duration::from_secs(30), task_tracker.wait()).await {
