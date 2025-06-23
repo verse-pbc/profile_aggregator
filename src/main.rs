@@ -421,20 +421,25 @@ async fn main() -> Result<()> {
     let keys = Keys::parse(&relay_secret)?;
     println!("🔑 Relay public key: {}", keys.public_key());
 
-    // Create the crypto worker and database
+    // Create task tracker and cancellation token for coordinated shutdown
     let cancellation_token = CancellationToken::new();
     let task_tracker = TaskTracker::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
     let database_path = std::env::var("DATABASE_PATH")
         .unwrap_or_else(|_| "./data/profile_aggregator.db".to_string());
 
-    let database = Arc::new(RelayDatabase::new(&database_path, crypto_sender)?);
-
     // The oldest timestamp will be discovered during the first cache refresh
+
+    // Create crypto worker and database with shared TaskTracker
+    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
+    let database = Arc::new(RelayDatabase::with_task_tracker(
+        &database_path,
+        crypto_sender,
+        task_tracker.clone(),
+    )?);
 
     // Initialize and periodically update profile count
     let database_clone = database.clone();
-    tokio::spawn(async move {
+    task_tracker.spawn(async move {
         loop {
             match update_profile_count(&database_clone).await {
                 Ok(count) => {
@@ -459,7 +464,7 @@ async fn main() -> Result<()> {
 
     // Periodically refresh the random profiles cache
     let database_clone = database.clone();
-    tokio::spawn(async move {
+    task_tracker.spawn(async move {
         // Wait 1 minute before first refresh (since we just initialized)
         tokio::time::sleep(Duration::from_secs(60)).await;
 
@@ -473,7 +478,7 @@ async fn main() -> Result<()> {
     });
 
     // Periodically log the least shown profiles
-    tokio::spawn(async move {
+    task_tracker.spawn(async move {
         loop {
             // Wait 5 minutes
             tokio::time::sleep(Duration::from_secs(300)).await;
@@ -553,6 +558,7 @@ async fn main() -> Result<()> {
     // Build the WebSocket server without default HTML
     let ws_handler = RelayBuilder::new(config.clone())
         .without_html()
+        .with_task_tracker(task_tracker.clone())
         .build_axum_handler(filter.as_ref().clone(), relay_info.clone())
         .await?;
 
@@ -619,7 +625,7 @@ async fn main() -> Result<()> {
 
     // Spawn the aggregation service
     let aggregation_service_token = cancellation_token.clone();
-    let aggregation_handle = tokio::spawn(async move {
+    let aggregation_handle = task_tracker.spawn(async move {
         info!("🔄 Starting profile aggregation service...");
         tokio::select! {
             result = aggregation_service.run() => {
@@ -684,7 +690,21 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!("Server stopped");
+    info!("Server stopped, waiting for background tasks...");
+
+    // Close the TaskTracker to prevent new tasks
+    task_tracker.close();
+
+    // Wait for all background tasks to complete
+    match tokio::time::timeout(Duration::from_secs(30), task_tracker.wait()).await {
+        Ok(()) => info!("All background tasks completed successfully"),
+        Err(_) => {
+            error!("Timeout waiting for background tasks to complete");
+            std::process::exit(1);
+        }
+    }
+
+    info!("Clean shutdown complete");
 
     Ok(())
 }
