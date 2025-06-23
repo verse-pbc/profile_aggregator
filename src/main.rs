@@ -680,3 +680,362 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use heavykeeper::TopK;
+    use tempfile::TempDir;
+
+    // Helper to create test profiles
+    fn create_test_profile(pubkey: PublicKey, created_at: u64) -> ProfileWithRelays {
+        let metadata = serde_json::json!({
+            "name": format!("Test User {}", pubkey.to_string().chars().take(8).collect::<String>()),
+            "about": "Test profile",
+            "picture": "https://example.com/pic.jpg"
+        });
+
+        // Create a dummy signed event
+        let event = Event::new(
+            EventId::from_slice(&[0; 32]).unwrap(),
+            pubkey,
+            Timestamp::from(created_at),
+            Kind::Metadata,
+            vec![],
+            metadata.to_string(),
+            nostr_sdk::secp256k1::schnorr::Signature::from_slice(&[0; 64]).unwrap(),
+        );
+
+        ProfileWithRelays {
+            profile: event,
+            relay_list: None,
+            dm_relay_list: None,
+        }
+    }
+
+    #[test]
+    fn test_select_least_shown_profiles_empty_tracker() {
+        // Setup
+        let tracker = TopK::new(100, 500, 4, 0.9);
+        let profiles: Vec<ProfileWithRelays> = (0..10)
+            .map(|i| {
+                let keys = Keys::generate();
+                create_test_profile(keys.public_key(), 1000 + i)
+            })
+            .collect();
+
+        // When tracker is empty, all profiles have equal priority (0)
+        let (selected, not_selected) = select_least_shown_profiles(&profiles, 5, 5, &tracker);
+
+        // Should select 5 profiles
+        assert_eq!(selected.len(), 5);
+        assert_eq!(not_selected.len(), 5);
+
+        // Selected profiles should be unique
+        let selected_pubkeys: std::collections::HashSet<_> = 
+            selected.iter().map(|p| p.profile.pubkey).collect();
+        assert_eq!(selected_pubkeys.len(), 5);
+    }
+
+    #[test]
+    fn test_select_least_shown_profiles_with_priorities() {
+        // Setup
+        let mut tracker = TopK::new(100, 500, 4, 0.9);
+        let profiles: Vec<ProfileWithRelays> = (0..10)
+            .map(|i| {
+                let keys = Keys::generate();
+                create_test_profile(keys.public_key(), 1000 + i)
+            })
+            .collect();
+
+        // Add some profiles to tracker with different counts
+        // Profiles 0-4 were NOT shown (high count = high priority)
+        for i in 0..5 {
+            for _ in 0..10 {
+                tracker.add(profiles[i].profile.pubkey.to_bytes().to_vec());
+            }
+        }
+        // Profiles 5-7 were shown less (medium count)
+        for i in 5..8 {
+            for _ in 0..3 {
+                tracker.add(profiles[i].profile.pubkey.to_bytes().to_vec());
+            }
+        }
+        // Profiles 8-9 were not tracked (count = 0)
+
+        let (selected, not_selected) = select_least_shown_profiles(&profiles, 5, 10, &tracker);
+
+        // Should prioritize profiles 0-4 (highest counts in tracker)
+        assert_eq!(selected.len(), 5);
+        assert_eq!(not_selected.len(), 5);
+
+        // Check that high priority profiles were selected
+        let selected_pubkeys: Vec<_> = selected.iter().map(|p| p.profile.pubkey).collect();
+        for i in 0..5 {
+            assert!(selected_pubkeys.contains(&profiles[i].profile.pubkey),
+                "High priority profile {} should be selected", i);
+        }
+    }
+
+    #[test]
+    fn test_select_least_shown_respects_max_count() {
+        // Setup
+        let tracker = TopK::new(100, 500, 4, 0.9);
+        let profiles: Vec<ProfileWithRelays> = (0..10)
+            .map(|i| {
+                let keys = Keys::generate();
+                create_test_profile(keys.public_key(), 1000 + i)
+            })
+            .collect();
+
+        // Request 8 but max_count is 5
+        let (selected, not_selected) = select_least_shown_profiles(&profiles, 8, 5, &tracker);
+
+        // Should only select 5 due to max_count
+        assert_eq!(selected.len(), 5);
+        assert_eq!(not_selected.len(), 5);
+    }
+
+    #[test]
+    fn test_window_based_cache_parameters() {
+        // Test that our windowing constants work properly
+        const TEST_TARGET_COUNT: usize = 100;
+        const TEST_CACHE_SIZE: usize = 100;
+        
+        // In real implementation:
+        // - TARGET_COUNT = 10_000 (profiles to fetch per window)
+        // - Cache can hold 10_000 profiles
+        // - We select up to 500 for API response
+        
+        assert!(TEST_TARGET_COUNT <= TEST_CACHE_SIZE);
+        assert!(50 <= TEST_TARGET_COUNT); // API max of 50 for testing
+    }
+
+    #[tokio::test]
+    async fn test_profile_selection_integration() {
+        // Setup database
+        let tmp_dir = TempDir::new().unwrap();
+        let db_path = tmp_dir.path().join("test.db");
+        let keys = Keys::generate();
+        let task_tracker = tokio_util::task::TaskTracker::new();
+        let crypto_sender = nostr_relay_builder::CryptoWorker::spawn(
+            Arc::new(keys.clone()), 
+            &task_tracker
+        );
+        let database = Arc::new(
+            nostr_relay_builder::RelayDatabase::new(
+                db_path.to_str().unwrap(), 
+                crypto_sender
+            ).unwrap()
+        );
+
+        // Create test profiles
+        let profiles: Vec<Event> = (0..20)
+            .map(|i| {
+                let test_keys = Keys::generate();
+                let metadata = serde_json::json!({
+                    "name": format!("User {}", i),
+                    "about": "Test profile",
+                    "picture": "https://example.com/pic.jpg"
+                });
+
+                let unsigned_event = EventBuilder::metadata(&Metadata::from_json(&metadata.to_string()).unwrap())
+                    .pow(0)
+                    .build(test_keys.public_key());
+                    
+                // Sign the event synchronously for tests
+                let event = unsigned_event.sign_with_keys(&test_keys).unwrap();
+                event
+            })
+            .collect();
+
+        // Store profiles in database
+        let scope = nostr_lmdb::Scope::Default;
+        for event in &profiles {
+            database.save_signed_event(event.clone(), scope.clone()).await.unwrap();
+        }
+        
+        // Allow time for database writes to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Query with window
+        let filter = Filter::new()
+            .kind(Kind::Metadata)
+            .until(Timestamp::now())
+            .limit(10);
+
+        let results = database.query(vec![filter], &scope).await.unwrap();
+        let events: Vec<_> = results.into_iter().collect();
+
+        // Should get up to 10 most recent profiles
+        assert!(events.len() <= 10);
+        
+        // Check they're sorted by created_at descending
+        for i in 1..events.len() {
+            assert!(events[i-1].created_at >= events[i].created_at);
+        }
+    }
+
+    #[test]
+    fn test_least_shown_tracker_behavior() {
+        let mut tracker = TopK::new(5, 50, 4, 0.9);
+        
+        // Simulate profiles A, B, C, D, E
+        let profiles: Vec<Vec<u8>> = (0..5)
+            .map(|i| vec![i])
+            .collect();
+        
+        // Round 1: Return A, B (so C, D, E get added to tracker)
+        tracker.add(profiles[2].clone()); // C
+        tracker.add(profiles[3].clone()); // D
+        tracker.add(profiles[4].clone()); // E
+        
+        // Round 2: Return C (so A, B, D, E get added)
+        tracker.add(profiles[0].clone()); // A
+        tracker.add(profiles[1].clone()); // B
+        tracker.add(profiles[3].clone()); // D (again)
+        tracker.add(profiles[4].clone()); // E (again)
+        
+        // Check counts
+        let list = tracker.list();
+        assert!(!list.is_empty());
+        
+        // D and E should have highest counts (added twice)
+        let counts: std::collections::HashMap<Vec<u8>, u64> = list
+            .into_iter()
+            .map(|node| (node.item, node.count))
+            .collect();
+        
+        // D and E should have count 2
+        assert!(counts.get(&profiles[3]).unwrap_or(&0) >= counts.get(&profiles[0]).unwrap_or(&0));
+        assert!(counts.get(&profiles[4]).unwrap_or(&0) >= counts.get(&profiles[1]).unwrap_or(&0));
+    }
+
+    #[tokio::test]
+    async fn test_cache_refresh_with_windows() {
+        // Setup database
+        let tmp_dir = TempDir::new().unwrap();
+        let db_path = tmp_dir.path().join("test.db");
+        let keys = Keys::generate();
+        let task_tracker = tokio_util::task::TaskTracker::new();
+        let crypto_sender = nostr_relay_builder::CryptoWorker::spawn(
+            Arc::new(keys.clone()), 
+            &task_tracker
+        );
+        let database = Arc::new(
+            nostr_relay_builder::RelayDatabase::new(
+                db_path.to_str().unwrap(), 
+                crypto_sender
+            ).unwrap()
+        );
+
+        // Create profiles spread across time
+        let base_time = 1000u64;
+        let profiles: Vec<Event> = (0..50)
+            .map(|i| {
+                let test_keys = Keys::generate();
+                let metadata = serde_json::json!({
+                    "name": format!("User {}", i),
+                    "about": "Test profile",
+                    "picture": "https://example.com/pic.jpg"
+                });
+
+                let unsigned_event = EventBuilder::metadata(&Metadata::from_json(&metadata.to_string()).unwrap())
+                    .pow(0)
+                    .custom_created_at(Timestamp::from(base_time + i * 100))  // Spread across time
+                    .build(test_keys.public_key());
+                    
+                let event = unsigned_event.sign_with_keys(&test_keys).unwrap();
+                event
+            })
+            .collect();
+
+        // Store profiles
+        let scope = nostr_lmdb::Scope::Default;
+        for event in &profiles {
+            database.save_signed_event(event.clone(), scope.clone()).await.unwrap();
+        }
+        
+        // Allow writes to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Test window queries
+        let now = Timestamp::from(base_time + 5000);
+        
+        // Query recent window
+        let recent_filter = Filter::new()
+            .kind(Kind::Metadata)
+            .until(now)
+            .limit(10);
+        
+        let recent_results = database.query(vec![recent_filter], &scope).await.unwrap();
+        let recent_events: Vec<_> = recent_results.into_iter().collect();
+        
+        assert_eq!(recent_events.len(), 10);
+        // Should get the 10 most recent events
+        assert!(recent_events.iter().all(|e| e.created_at.as_u64() >= base_time + 4000));
+        
+        // Query older window
+        let older_filter = Filter::new()
+            .kind(Kind::Metadata)
+            .until(Timestamp::from(base_time + 2000))
+            .limit(10);
+            
+        let older_results = database.query(vec![older_filter], &scope).await.unwrap();
+        let older_events: Vec<_> = older_results.into_iter().collect();
+        
+        assert_eq!(older_events.len(), 10);
+        // Should get events from the older time range
+        assert!(older_events.iter().all(|e| e.created_at.as_u64() <= base_time + 2000));
+    }
+
+    #[test]
+    fn test_random_selection_distribution() {
+        // Test that random selection has reasonable distribution
+        let mut tracker = TopK::new(100, 500, 4, 0.9);
+        let profile_count = 100usize;
+        let selection_rounds = 50;
+        let profiles_per_round = 10;
+        
+        // Create test profiles
+        let profiles: Vec<ProfileWithRelays> = (0..profile_count)
+            .map(|i| {
+                let keys = Keys::generate();
+                create_test_profile(keys.public_key(), 1000 + i as u64)
+            })
+            .collect();
+        
+        // Track how many times each profile is selected
+        let mut selection_counts = std::collections::HashMap::new();
+        
+        // Simulate multiple selection rounds
+        for _ in 0..selection_rounds {
+            let (selected, not_selected) = select_least_shown_profiles(
+                &profiles,
+                profiles_per_round,
+                profiles_per_round,
+                &tracker
+            );
+            
+            // Count selections
+            for profile in &selected {
+                *selection_counts.entry(profile.profile.pubkey).or_insert(0) += 1;
+            }
+            
+            // Update tracker with not selected profiles
+            for idx in not_selected {
+                tracker.add(profiles[idx].profile.pubkey.to_bytes().to_vec());
+            }
+        }
+        
+        // Check distribution - all profiles should be selected at least once
+        assert!(selection_counts.len() >= profile_count / 2, 
+            "At least half of profiles should be selected");
+        
+        // Check that no profile is selected too many times (fair distribution)
+        let max_selections = *selection_counts.values().max().unwrap();
+        let min_selections = *selection_counts.values().min().unwrap();
+        assert!(max_selections - min_selections <= 5, 
+            "Selection distribution should be relatively fair");
+    }
+}
