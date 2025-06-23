@@ -82,13 +82,13 @@ static PROFILE_COUNT: RwLock<usize> = RwLock::new(0);
 // Global cache for random profiles
 static RANDOM_PROFILES_CACHE: RwLock<Vec<ProfileWithRelays>> = RwLock::new(Vec::new());
 
-// Global TopK tracker for shown profiles
-static SHOWN_PROFILES: LazyLock<RwLock<TopK<Vec<u8>>>> = LazyLock::new(|| {
+// Global TopK tracker for least shown profiles
+static LEAST_SHOWN_PROFILES: LazyLock<RwLock<TopK<Vec<u8>>>> = LazyLock::new(|| {
     RwLock::new(
-        // Track top 1000 most shown profiles
-        // width=5000, depth=4 for good accuracy
-        // decay=0.9 for gradual forgetting
-        TopK::new(1000, 5000, 4, 0.9),
+        // Track top 10000 least shown profiles (by tracking items NOT returned)
+        // width=50000, depth=4 for good accuracy
+        // decay=0.9 for gradual forgetting of old patterns
+        TopK::new(10_000, 50_000, 4, 0.9),
     )
 });
 
@@ -270,6 +270,73 @@ async fn refresh_random_profiles_cache(database: Arc<RelayDatabase>) -> Result<(
     Ok(())
 }
 
+/// Select profiles from cache prioritizing least shown ones
+/// Returns selected profiles and indices of non-selected profiles
+fn select_least_shown_profiles(
+    cache: &[ProfileWithRelays],
+    count: usize,
+    max_count: usize,
+    least_shown_tracker: &TopK<Vec<u8>>,
+) -> (Vec<ProfileWithRelays>, Vec<usize>) {
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::from_entropy();
+
+    // Get the least shown profiles from HeavyKeeper
+    let least_shown_list = least_shown_tracker.list();
+
+    // Create a map for quick lookup of priority scores
+    let mut priority_map: std::collections::HashMap<Vec<u8>, u64> =
+        std::collections::HashMap::new();
+    for node in least_shown_list.iter() {
+        // Higher count in HeavyKeeper = less shown = higher priority
+        priority_map.insert(node.item.clone(), node.count);
+    }
+
+    // Create indices with priority scores
+    let mut indices_with_priority: Vec<(usize, u64)> = cache
+        .iter()
+        .enumerate()
+        .map(|(idx, profile)| {
+            let pubkey_bytes = profile.profile.pubkey.to_bytes().to_vec();
+            let priority = priority_map.get(&pubkey_bytes).copied().unwrap_or(0);
+            (idx, priority)
+        })
+        .collect();
+
+    // Sort by priority (descending - higher priority first)
+    indices_with_priority.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Take the top priority items up to the count
+    let mut selected_indices = Vec::new();
+    let mut remaining_indices = Vec::new();
+
+    for (i, (idx, _priority)) in indices_with_priority.into_iter().enumerate() {
+        if i < count.min(max_count) {
+            selected_indices.push(idx);
+        } else {
+            remaining_indices.push(idx);
+        }
+    }
+
+    // If we have items with same priority (e.g., all zero), shuffle within priority groups
+    selected_indices.shuffle(&mut rng);
+
+    // Build results
+    let mut results = Vec::new();
+    let mut not_selected = Vec::new();
+
+    for (idx, profile) in cache.iter().enumerate() {
+        if selected_indices.contains(&idx) {
+            results.push(profile.clone());
+        } else {
+            not_selected.push(idx);
+        }
+    }
+
+    (results, not_selected)
+}
+
 async fn random_profiles_handler_impl(
     _database: Arc<RelayDatabase>,
     params: RandomQuery,
@@ -287,68 +354,30 @@ async fn random_profiles_handler_impl(
         return Json::<Vec<ProfileWithRelays>>(vec![]).into_response();
     }
 
-    // Get the set of frequently shown profiles
-    let shown_tracker = SHOWN_PROFILES.read().unwrap();
-    let frequently_shown: std::collections::HashSet<Vec<u8>> = shown_tracker
-        .list()
-        .into_iter()
-        .map(|node| node.item)
-        .collect();
-    drop(shown_tracker);
+    // Get the least shown tracker
+    let least_shown_tracker = LEAST_SHOWN_PROFILES.read().unwrap();
 
-    // Build indices for rarely shown and frequently shown profiles
-    let mut rarely_shown_indices = Vec::new();
-    let mut frequently_shown_indices = Vec::new();
-
-    for (idx, profile) in cache.iter().enumerate() {
-        if frequently_shown.contains(profile.profile.pubkey.to_bytes().as_slice()) {
-            frequently_shown_indices.push(idx);
-        } else {
-            rarely_shown_indices.push(idx);
-        }
-    }
-
-    info!(
-        "Cache partitioned: {} rarely shown, {} frequently shown",
-        rarely_shown_indices.len(),
-        frequently_shown_indices.len()
+    // Select profiles prioritizing least shown
+    let (mut results, not_selected_indices) = select_least_shown_profiles(
+        &cache,
+        count,
+        500, // max_count
+        &least_shown_tracker,
     );
 
-    // Randomly sample from the cache with priority to rarely shown
-    use rand::seq::SliceRandom;
-    use rand::SeedableRng;
-    let mut rng = rand::rngs::StdRng::from_entropy();
+    drop(least_shown_tracker);
 
-    let mut results = Vec::new();
+    info!(
+        "Selected {} profiles, {} not selected",
+        results.len(),
+        not_selected_indices.len()
+    );
 
-    // First, take from rarely shown profiles
-    let rarely_shown_sample_indices: Vec<_> = rarely_shown_indices
-        .choose_multiple(&mut rng, count.min(rarely_shown_indices.len()))
-        .copied()
-        .collect();
-
-    for idx in rarely_shown_sample_indices {
-        results.push(cache[idx].clone());
-    }
-
-    // If we need more, take from frequently shown
-    if results.len() < count && !frequently_shown_indices.is_empty() {
-        let remaining = count - results.len();
-        let frequently_shown_sample_indices: Vec<_> = frequently_shown_indices
-            .choose_multiple(&mut rng, remaining.min(frequently_shown_indices.len()))
-            .copied()
-            .collect();
-
-        for idx in frequently_shown_sample_indices {
-            results.push(cache[idx].clone());
-        }
-    }
-
-    // Track what we're showing
+    // Update the tracker with profiles NOT returned (they become "least shown")
     {
-        let mut shown_tracker = SHOWN_PROFILES.write().unwrap();
-        for profile in &results {
-            shown_tracker.add(profile.profile.pubkey.to_bytes().to_vec());
+        let mut least_shown_tracker = LEAST_SHOWN_PROFILES.write().unwrap();
+        for idx in not_selected_indices {
+            least_shown_tracker.add(cache[idx].profile.pubkey.to_bytes().to_vec());
         }
     }
 
@@ -442,20 +471,20 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Periodically log the most shown profiles
+    // Periodically log the least shown profiles
     tokio::spawn(async move {
         loop {
             // Wait 5 minutes
             tokio::time::sleep(Duration::from_secs(300)).await;
 
-            let shown_tracker = SHOWN_PROFILES.read().unwrap();
-            let top_profiles = shown_tracker.list();
-            if !top_profiles.is_empty() {
-                info!("Top 10 most shown profiles:");
-                for (i, node) in top_profiles.iter().take(10).enumerate() {
+            let least_shown_tracker = LEAST_SHOWN_PROFILES.read().unwrap();
+            let least_shown_list = least_shown_tracker.list();
+            if !least_shown_list.is_empty() {
+                info!("Top 10 least shown profiles (high priority for display):");
+                for (i, node) in least_shown_list.iter().take(10).enumerate() {
                     if let Ok(pubkey_bytes) = <[u8; 32]>::try_from(node.item.as_slice()) {
                         let pubkey = PublicKey::from_byte_array(pubkey_bytes);
-                        info!("  {}. {} - shown {} times", i + 1, pubkey, node.count);
+                        info!("  {}. {} - not shown {} times", i + 1, pubkey, node.count);
                     }
                 }
             }
