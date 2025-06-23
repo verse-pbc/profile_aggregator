@@ -125,10 +125,20 @@ impl ProfileAggregationService {
             .opts(gossip_options)
             .build();
 
-        // Add discovery relay
-        gossip_client
-            .add_discovery_relay("wss://relay.nos.social")
-            .await?;
+        // Add multiple discovery relays for better coverage
+        let discovery_relays = vec![
+            "wss://relay.nos.social",
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://relay.primal.net",
+        ];
+
+        for relay in discovery_relays {
+            if let Err(e) = gossip_client.add_discovery_relay(relay).await {
+                warn!("Failed to add discovery relay {}: {}", relay, e);
+            }
+        }
+
         gossip_client.connect().await;
 
         let gossip_client = Arc::new(gossip_client);

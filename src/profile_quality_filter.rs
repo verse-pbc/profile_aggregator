@@ -281,15 +281,17 @@ impl ProfileQualityFilter {
         if let Some(gossip_client) = gossip_client {
             // Fetch all three kinds (TextNote, relay list, DM relays) via gossip/outbox
             match self.fetch_user_events(event.pubkey, gossip_client).await {
-                Ok(events) => {
+                Ok((events, relays_with_content)) => {
                     let mut has_text_note = false;
                     let mut relay_events = Vec::new();
+                    let mut has_relay_list = false;
 
                     // Check what we found
                     debug!(
-                        "Fetched {} total events for {}",
+                        "Fetched {} total events for {} from {} relays",
                         events.len(),
-                        event.pubkey.to_hex()[..8].to_string() + "..."
+                        event.pubkey.to_hex()[..8].to_string() + "...",
+                        relays_with_content.len()
                     );
                     for fetched_event in events {
                         match fetched_event.kind.as_u16() {
@@ -308,6 +310,7 @@ impl ProfileQualityFilter {
                                     event.pubkey.to_hex()[..8].to_string() + "..."
                                 );
                                 relay_events.push((fetched_event, "relay list"));
+                                has_relay_list = true;
                             }
                             10050 => {
                                 // DM relay metadata
@@ -352,6 +355,14 @@ impl ProfileQualityFilter {
                             Box::new(relay_event),
                             subdomain.clone(),
                         ));
+                    }
+
+                    // If no relay list was found but we found content, log it
+                    if !has_relay_list && has_text_note {
+                        debug!(
+                            "User {} has verified content but no published relay lists",
+                            event.pubkey.to_hex()[..8].to_string() + "..."
+                        );
                     }
 
                     debug!(
@@ -419,11 +430,12 @@ impl ProfileQualityFilter {
     }
 
     /// Fetch user events (TextNote, relay list, DM relays) using separate queries
+    /// Returns (events, relays_with_content)
     async fn fetch_user_events(
         &self,
         pubkey: PublicKey,
         client: &Client,
-    ) -> Result<Vec<Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Vec<Event>, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
         let mut all_events = Vec::new();
         let timeout = std::time::Duration::from_secs(5);
 
@@ -461,7 +473,13 @@ impl ProfileQualityFilter {
             }
         }
 
-        Ok(all_events)
+        // Track which relays actually had content for this user
+        let relays_with_content = Vec::new();
+
+        // For now, we're not tracking specific relay sources
+        // This would require more complex subscription handling
+
+        Ok((all_events, relays_with_content))
     }
 }
 

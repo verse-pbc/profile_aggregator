@@ -11,11 +11,11 @@ use nostr_sdk::prelude::*;
 use profile_aggregator::{
     ProfileAggregationConfig, ProfileAggregationService, ProfileQualityFilter,
 };
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -41,6 +41,133 @@ struct ProfileWithRelays {
     dm_relay_list: Option<Event>,
 }
 
+// Global state for oldest timestamp
+static OLDEST_TIMESTAMP: RwLock<Option<u64>> = RwLock::new(None);
+// Global state for profile count
+static PROFILE_COUNT: RwLock<usize> = RwLock::new(0);
+
+async fn find_oldest_timestamp(database: &Arc<RelayDatabase>) -> Result<u64> {
+    info!("Finding oldest timestamp using binary search...");
+
+    let scope = nostr_lmdb::Scope::Default;
+    let now = Timestamp::now().as_u64();
+    const YEAR_SECONDS: u64 = 365 * 24 * 60 * 60;
+
+    // Start by going back year by year to find a period with no events
+    let mut years_back = 1;
+    let mut found_empty_period = false;
+    let mut last_year_with_events = 0;
+
+    loop {
+        let until = Timestamp::from(now.saturating_sub((years_back - 1) * YEAR_SECONDS));
+
+        // Use only until to check if any events exist before this timestamp
+        let filter = Filter::new().kind(Kind::Metadata).until(until).limit(1);
+
+        match database.query(vec![filter], &scope).await {
+            Ok(events) => {
+                if events.into_iter().next().is_some() {
+                    // Found events, go back another year
+                    info!("Found events {} years back, going further...", years_back);
+                    last_year_with_events = years_back;
+                    years_back += 1;
+                } else {
+                    // No events before this timestamp
+                    info!("No events found {} years back", years_back);
+                    found_empty_period = true;
+                    break;
+                }
+            }
+            Err(e) => {
+                error!("Error querying for oldest timestamp: {}", e);
+                return Err(e.into());
+            }
+        }
+
+        // Safety limit
+        if years_back > 10 {
+            info!("Reached 10 years back, stopping search");
+            break;
+        }
+    }
+
+    // Now binary search within the period to find the exact oldest timestamp
+    let search_end = now.saturating_sub(last_year_with_events.saturating_sub(1) * YEAR_SECONDS);
+    let search_start = if found_empty_period {
+        now.saturating_sub(years_back * YEAR_SECONDS)
+    } else {
+        0 // If we went back 10 years and still found events, search from beginning of time
+    };
+
+    let mut left = search_start;
+    let mut right = search_end;
+    let mut oldest_found = right;
+
+    info!("Binary searching between {} and {}", left, right);
+
+    while left < right {
+        let mid = left + (right - left) / 2;
+
+        // Check if there are any events before mid timestamp
+        let filter = Filter::new()
+            .kind(Kind::Metadata)
+            .until(Timestamp::from(mid))
+            .limit(1);
+
+        match database.query(vec![filter], &scope).await {
+            Ok(events) => {
+                if let Some(event) = events.into_iter().next() {
+                    // Found an event, so there might be older ones
+                    oldest_found = event.created_at.as_u64();
+                    right = mid;
+                } else {
+                    // No events before mid, search in the right half
+                    left = mid + 1;
+                }
+            }
+            Err(e) => {
+                error!("Error during binary search: {}", e);
+                return Err(e.into());
+            }
+        }
+
+        // Precision threshold - stop when we're within a day
+        if right - left < 86400 {
+            break;
+        }
+    }
+
+    // Do one final query to get the actual oldest event
+    let final_filter = Filter::new()
+        .kind(Kind::Metadata)
+        .until(Timestamp::from(oldest_found + 86400)) // Add a day buffer
+        .limit(1);
+
+    if let Ok(events) = database.query(vec![final_filter], &scope).await {
+        if let Some(event) = events.into_iter().next() {
+            oldest_found = event.created_at.as_u64();
+        }
+    }
+
+    let span_days = (now - oldest_found) / 86400;
+    info!(
+        "Oldest timestamp found: {} ({} days ago)",
+        oldest_found, span_days
+    );
+
+    Ok(oldest_found)
+}
+
+/// Update the cached profile count
+async fn update_profile_count(
+    database: &Arc<RelayDatabase>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let scope = nostr_lmdb::Scope::Default;
+    let filter = Filter::new().kind(Kind::Metadata);
+    let count = database.count(vec![filter], &scope).await?;
+    Ok(count)
+}
+
 async fn random_profiles_handler_impl(
     database: Arc<RelayDatabase>,
     params: RandomQuery,
@@ -48,53 +175,68 @@ async fn random_profiles_handler_impl(
 ) -> Response {
     // Cap the count at 500
     let count = params.count.min(500);
+    info!("Random profiles requested: count={}", count);
 
-    // Get current timestamp and create random time windows
-    let now = Timestamp::now();
+    // Get cached oldest timestamp
+    let oldest_timestamp = match OLDEST_TIMESTAMP.read().unwrap().as_ref() {
+        Some(&ts) => ts,
+        None => {
+            info!("Oldest timestamp not initialized");
+            return Json::<Vec<ProfileWithRelays>>(vec![]).into_response();
+        }
+    };
+
+    use rand::Rng;
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::from_entropy();
 
-    // Collect random profiles
-    let mut profiles = Vec::new();
+    let scope = nostr_lmdb::Scope::Default;
+    let mut selected_profiles = Vec::new();
     let mut attempts = 0;
-    let max_attempts = count * 10; // Try up to 10x to get enough profiles
+    let max_attempts = count * 3; // Allow more attempts for larger counts
 
-    while profiles.len() < count && attempts < max_attempts {
+    let now = Timestamp::now().as_u64();
+
+    // Collect random profiles one by one
+    while selected_profiles.len() < count && attempts < max_attempts {
         attempts += 1;
 
-        // Generate random time window (looking back up to ~6 months)
-        let random_seconds_ago = rng.gen_range(0..15_552_000u64); // 180 days in seconds
-        let window_start = Timestamp::from(now.as_u64().saturating_sub(random_seconds_ago));
-        let window_size = rng.gen_range(3600..86400); // 1 hour to 1 day window
-        let window_end = Timestamp::from(window_start.as_u64() + window_size);
+        // Pick a random timestamp between oldest and now
+        let random_timestamp = rng.gen_range(oldest_timestamp..=now);
 
+        // Query for the most recent profile before this timestamp
         let filter = Filter::new()
             .kind(Kind::Metadata)
-            .since(window_start)
-            .until(window_end)
-            .limit(count - profiles.len());
+            .until(Timestamp::from(random_timestamp))
+            .limit(1);
 
-        let scope = nostr_lmdb::Scope::Default;
         match database.query(vec![filter], &scope).await {
             Ok(events) => {
-                for event in events {
-                    if !profiles.iter().any(|p: &Event| p.pubkey == event.pubkey) {
-                        profiles.push(event);
-                        if profiles.len() >= count {
-                            break;
-                        }
+                if let Some(event) = events.into_iter().next() {
+                    // Check if we already have this profile (avoid duplicates)
+                    if !selected_profiles
+                        .iter()
+                        .any(|e: &Event| e.pubkey == event.pubkey)
+                    {
+                        selected_profiles.push(event);
                     }
                 }
             }
             Err(e) => {
-                error!("Failed to query profiles: {}", e);
+                error!("Error querying random profile: {}", e);
             }
         }
     }
 
+    info!(
+        "Selected {} random profiles after {} attempts",
+        selected_profiles.len(),
+        attempts
+    );
+
     // Now fetch relay lists for each profile
     let mut results = Vec::new();
-    for profile in profiles {
+    for profile in selected_profiles {
         let relay_filter = Filter::new()
             .author(profile.pubkey)
             .kinds(vec![Kind::Custom(10002), Kind::Custom(10050)]);
@@ -137,6 +279,7 @@ async fn random_profiles_handler_impl(
 
 fn render_profiles_html(profiles: &[ProfileWithRelays]) -> String {
     let profiles_json = serde_json::to_string(profiles).unwrap_or_default();
+    let profile_count = *PROFILE_COUNT.read().unwrap();
 
     format!(
         r#"<!DOCTYPE html>
@@ -211,6 +354,7 @@ fn render_profiles_html(profiles: &[ProfileWithRelays]) -> String {
         
         .profile-info {{
             flex: 1;
+            min-width: 0; /* Allow flex item to shrink below content size */
         }}
         
         .profile-name {{
@@ -218,6 +362,9 @@ fn render_profiles_html(profiles: &[ProfileWithRelays]) -> String {
             font-weight: 600;
             color: #fff;
             margin-bottom: 4px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }}
         
         .profile-pubkey {{
@@ -345,6 +492,7 @@ fn render_profiles_html(profiles: &[ProfileWithRelays]) -> String {
 <body>
     <div class="container">
         <h1>Random Nostr Profiles</h1>
+        <p style="text-align: center; color: #999; margin-top: -20px; margin-bottom: 30px; font-size: 0.9rem;">Total profiles in database: {profile_count}</p>
         <div id="profiles-container" class="profiles-grid">
             <div class="loading">Loading profiles...</div>
         </div>
@@ -461,7 +609,7 @@ fn render_profiles_html(profiles: &[ProfileWithRelays]) -> String {
                                 return `<div class="relay-item"><span class="relay-url">${{r.url}}</span><span class="relay-marker">${{marker}}</span></div>`;
                             }}).join('')}}</div>
                         </div>
-                    ` : '<div class="no-relays">No relay list</div>'}}
+                    ` : '<div class="no-relays">No relay lists published</div>'}}
                     ${{dmRelays.length > 0 ? `
                         <div class="relay-section">
                             <div class="relay-title">DM Inbox Relays (NIP-17)</div>
@@ -509,6 +657,35 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "./data/profile_aggregator.db".to_string());
 
     let database = Arc::new(RelayDatabase::new(&database_path, crypto_sender)?);
+
+    // Find and cache the oldest timestamp for random selection
+    match find_oldest_timestamp(&database).await {
+        Ok(oldest) => {
+            *OLDEST_TIMESTAMP.write().unwrap() = Some(oldest);
+        }
+        Err(e) => {
+            error!("Failed to find oldest timestamp: {}", e);
+            // Continue anyway - random endpoint will return empty results
+        }
+    }
+
+    // Initialize and periodically update profile count
+    let database_clone = database.clone();
+    tokio::spawn(async move {
+        loop {
+            match update_profile_count(&database_clone).await {
+                Ok(count) => {
+                    *PROFILE_COUNT.write().unwrap() = count;
+                    info!("Updated profile count: {} profiles", count);
+                }
+                Err(e) => {
+                    error!("Failed to update profile count: {}", e);
+                }
+            }
+            // Wait 5 minutes before next update
+            tokio::time::sleep(Duration::from_secs(300)).await;
+        }
+    });
 
     // Configure the relay
     let relay_url =
@@ -732,7 +909,6 @@ async fn main() -> Result<()> {
             
             <div style="margin-top: 20px;">
                 <a href="/random" class="link-button">View Random Profiles</a>
-                <a href="/random?count=20" class="link-button">View 20 Random Profiles</a>
             </div>
             
             <h3>Example API Usage</h3>
@@ -803,6 +979,8 @@ curl -H "Accept: text/html" https://relay.yestr.social/random</pre>
             }
         }
     });
+
+    // No need to periodically refresh - oldest timestamp is stable
 
     println!("\nProfile Aggregator starting");
     println!("WebSocket: ws://{}", addr);
