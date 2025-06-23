@@ -295,6 +295,9 @@ async fn random_profiles_handler_impl(
         });
     }
 
+    // Sort results by created_at in descending order (most recent first)
+    results.sort_by(|a, b| b.profile.created_at.cmp(&a.profile.created_at));
+
     // Check Accept header to determine response type
     let accept = headers
         .get("accept")
