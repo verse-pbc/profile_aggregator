@@ -2665,7 +2665,6 @@ dependencies = [
  "image",
  "imageinfo",
  "imagesize",
- "lazy_static",
  "nostr",
  "nostr-database",
  "nostr-lmdb",

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{LazyLock, RwLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -83,14 +83,14 @@ static PROFILE_COUNT: RwLock<usize> = RwLock::new(0);
 static RANDOM_PROFILES_CACHE: RwLock<Vec<ProfileWithRelays>> = RwLock::new(Vec::new());
 
 // Global TopK tracker for shown profiles
-lazy_static::lazy_static! {
-    static ref SHOWN_PROFILES: RwLock<TopK<Vec<u8>>> = RwLock::new(
+static SHOWN_PROFILES: LazyLock<RwLock<TopK<Vec<u8>>>> = LazyLock::new(|| {
+    RwLock::new(
         // Track top 1000 most shown profiles
         // width=5000, depth=4 for good accuracy
         // decay=0.9 for gradual forgetting
-        TopK::new(1000, 5000, 4, 0.9)
-    );
-}
+        TopK::new(1000, 5000, 4, 0.9),
+    )
+});
 
 /// Update the cached profile count
 async fn update_profile_count(
