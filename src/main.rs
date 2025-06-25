@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
 
 // HTML templates
@@ -170,7 +170,7 @@ async fn refresh_random_profiles_cache(database: Arc<RelayDatabase>) -> Result<(
                     if let Some(oldest_event) = older_batch.last() {
                         let new_oldest = oldest_event.created_at.as_u64();
                         *OLDEST_TIMESTAMP.write().unwrap() = Some(new_oldest);
-                        info!("Expanded range: found older timestamp {} from second window with {} profiles", 
+                        info!("Expanded range: found older timestamp {} from second window with {} profiles",
                               new_oldest, older_batch.len());
                     }
                     // Add the older profiles to our collection
@@ -487,11 +487,9 @@ async fn main() -> Result<()> {
 
     // Create crypto worker and database with shared TaskTracker
     let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-    let database = Arc::new(RelayDatabase::with_task_tracker(
-        &database_path,
-        crypto_sender,
-        task_tracker.clone(),
-    )?);
+    let (database, db_sender) =
+        RelayDatabase::with_task_tracker(&database_path, crypto_sender, task_tracker.clone())?;
+    let database = Arc::new(database);
 
     // Run migration to clean up profiles with empty pictures
     info!("Running migration to clean up profiles with empty pictures...");
@@ -588,7 +586,7 @@ async fn main() -> Result<()> {
     // Configure the relay
     let relay_url =
         std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:8080".to_string());
-    let config = RelayConfig::new(&relay_url, database.clone(), keys);
+    let config = RelayConfig::new(&relay_url, (database.clone(), db_sender.clone()), keys);
 
     // Get discovery relay URLs
     let discovery_relay_urls = vec![std::env::var("DISCOVERY_RELAY_URL")
@@ -626,10 +624,15 @@ async fn main() -> Result<()> {
     let filter = Arc::new(ProfileQualityFilter::new(database.clone()));
 
     // Both services use the same filter
-    let aggregation_service =
-        ProfileAggregationService::new(aggregation_config, filter.clone(), database.clone())
-            .await
-            .expect("Failed to create aggregation service");
+    let aggregation_service = ProfileAggregationService::new(
+        aggregation_config,
+        filter.clone(),
+        db_sender.clone(),
+        cancellation_token.clone(),
+        task_tracker.clone(),
+    )
+    .await
+    .expect("Failed to create aggregation service");
 
     // Create relay info for NIP-11
     let relay_info = RelayInfo {
@@ -647,7 +650,9 @@ async fn main() -> Result<()> {
     let ws_handler = RelayBuilder::new(config.clone())
         .without_html()
         .with_task_tracker(task_tracker.clone())
-        .build_axum_handler(filter.as_ref().clone(), relay_info.clone())
+        .with_event_processor(filter.as_ref().clone())
+        .with_relay_info(relay_info.clone())
+        .build_axum()
         .await?;
 
     // Create custom root handler that combines WebSocket and HTML
@@ -745,9 +750,6 @@ async fn main() -> Result<()> {
     println!("- Database: {}", database_path);
     println!("- State: {}", state_file);
 
-    // Close the TaskTracker to prevent new tasks from being spawned
-    task_tracker.close();
-
     // Handle shutdown signal
     let shutdown_token = cancellation_token.clone();
     let shutdown_signal = async move {
@@ -783,26 +785,16 @@ async fn main() -> Result<()> {
 
     info!("Server stopped, shutting down services...");
 
-    // The database is held by multiple Arc references:
-    // 1. The 3 periodic background tasks (profile count, cache refresh, least shown)
-    // 2. The aggregation service task
-    // 3. The ProfileQualityFilter (held by filter)
-    // 4. The RelayConfig (held by config)
-    // 5. The WebSocket handler (ws_handler)
-    // 6. Inside the HTTP handlers (moved into closures)
-    // Total: ~8 references
+    // Clean up resources
+    drop(db_sender);
+    drop(filter);
+    drop(config);
+    drop(ws_handler);
 
-    // Since we can't drop all references (some were moved), we'll just log a warning
-    // The database Drop implementation will close channels, causing workers to exit
-    warn!(
-        "Database has {} references remaining. Database shutdown will happen via Drop, \
-        which may not wait for all pending writes to complete.",
-        Arc::strong_count(&database)
-    );
+    // Close the TaskTracker and wait for all background tasks
+    task_tracker.close();
 
     info!("Waiting for background tasks...");
-
-    // Wait for all background tasks to complete
     match tokio::time::timeout(Duration::from_secs(30), task_tracker.wait()).await {
         Ok(()) => info!("All background tasks completed successfully"),
         Err(_) => {
@@ -962,10 +954,10 @@ mod tests {
         let task_tracker = tokio_util::task::TaskTracker::new();
         let crypto_sender =
             nostr_relay_builder::CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-        let database = Arc::new(
+        let (database, db_sender) =
             nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap(), crypto_sender)
-                .unwrap(),
-        );
+                .unwrap();
+        let database = Arc::new(database);
 
         // Create test profiles
         let profiles: Vec<Event> = (0..20)
@@ -990,7 +982,7 @@ mod tests {
         // Store profiles in database
         let scope = nostr_lmdb::Scope::Default;
         for event in &profiles {
-            database
+            db_sender
                 .save_signed_event(event.clone(), scope.clone())
                 .await
                 .unwrap();
@@ -1059,10 +1051,10 @@ mod tests {
         let task_tracker = tokio_util::task::TaskTracker::new();
         let crypto_sender =
             nostr_relay_builder::CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-        let database = Arc::new(
+        let (database, db_sender) =
             nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap(), crypto_sender)
-                .unwrap(),
-        );
+                .unwrap();
+        let database = Arc::new(database);
 
         // Create profiles spread across time
         let base_time = 1000u64;
@@ -1088,7 +1080,7 @@ mod tests {
         // Store profiles
         let scope = nostr_lmdb::Scope::Default;
         for event in &profiles {
-            database
+            db_sender
                 .save_signed_event(event.clone(), scope.clone())
                 .await
                 .unwrap();

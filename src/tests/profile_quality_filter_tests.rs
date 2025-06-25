@@ -10,7 +10,8 @@ fn create_test_database() -> Arc<RelayDatabase> {
     let keys = Keys::generate();
     let task_tracker = TaskTracker::new();
     let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-    Arc::new(RelayDatabase::new(temp_dir.path(), crypto_sender).unwrap())
+    let (database, _db_sender) = RelayDatabase::new(temp_dir.path(), crypto_sender).unwrap();
+    Arc::new(database)
 }
 
 fn create_test_event(content: &str) -> Event {

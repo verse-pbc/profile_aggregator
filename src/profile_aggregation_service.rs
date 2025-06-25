@@ -7,7 +7,7 @@ use crate::profile_quality_filter::ProfileQualityFilter;
 use crate::profile_validator::ProfileValidator;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use nostr_relay_builder::RelayDatabase;
+use nostr_relay_builder::DatabaseSender;
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::{interval, sleep};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error, info, warn};
 
 /// Configuration for the profile aggregation service
@@ -87,6 +87,7 @@ pub struct ProfileAggregationService {
     validator: Arc<ProfileValidator>,
     state: Arc<RwLock<AggregationState>>,
     cancellation_token: CancellationToken,
+    task_tracker: TaskTracker,
 }
 
 impl ProfileAggregationService {
@@ -94,7 +95,9 @@ impl ProfileAggregationService {
     pub async fn new(
         config: ProfileAggregationConfig,
         filter: Arc<ProfileQualityFilter>,
-        database: Arc<RelayDatabase>,
+        db_sender: DatabaseSender,
+        cancellation_token: CancellationToken,
+        task_tracker: TaskTracker,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Load or create state
         let state = match Self::load_state(&config.state_file) {
@@ -107,8 +110,6 @@ impl ProfileAggregationService {
                 }))
             }
         };
-
-        let cancellation_token = CancellationToken::new();
 
         // Create gossip-enabled client for outbox verification
         info!("Creating gossip client for outbox verification");
@@ -146,7 +147,7 @@ impl ProfileAggregationService {
         // Create profile validator
         let validator = Arc::new(ProfileValidator::new(
             filter.clone(),
-            database.clone(),
+            db_sender,
             gossip_client.clone(),
         ));
 
@@ -155,6 +156,7 @@ impl ProfileAggregationService {
             validator,
             state,
             cancellation_token,
+            task_tracker,
         })
     }
 
@@ -174,13 +176,15 @@ impl ProfileAggregationService {
             let state = self.state.clone();
             let cancellation_token = self.cancellation_token.clone();
 
-            let handle = tokio::spawn(async move {
+            let task_tracker_for_harvester = self.task_tracker.clone();
+            let handle = self.task_tracker.spawn(async move {
                 let harvester = ProfileHarvester {
                     relay_url: relay_url.clone(),
                     config,
                     validator,
                     state,
-                    cancellation_token,
+                    cancellation_token: cancellation_token.clone(),
+                    task_tracker: task_tracker_for_harvester,
                 };
 
                 if let Err(e) = harvester.run().await {
@@ -302,6 +306,7 @@ struct ProfileHarvester {
     validator: Arc<ProfileValidator>,
     state: Arc<RwLock<AggregationState>>,
     cancellation_token: CancellationToken,
+    task_tracker: TaskTracker,
 }
 
 impl ProfileHarvester {
@@ -384,7 +389,7 @@ impl ProfileHarvester {
             let filters = self.config.filters.clone();
             let state = self.state.clone();
 
-            tokio::spawn(async move {
+            self.task_tracker.spawn(async move {
                 if let Err(e) = Self::run_realtime_subscription(
                     client,
                     validator,
@@ -401,8 +406,19 @@ impl ProfileHarvester {
             });
         }
 
-        // Run backward pagination (the main task)
-        self.run_backward_pagination(client).await
+        // Run backward pagination with cancellation support
+        let result = tokio::select! {
+            result = self.run_backward_pagination(client.clone()) => result,
+            _ = self.cancellation_token.cancelled() => {
+                info!("Backward pagination cancelled for {}", self.relay_url);
+                Ok(())
+            }
+        };
+
+        // Ensure client is properly shut down
+        client.shutdown().await;
+
+        result
     }
 
     async fn run_backward_pagination(
@@ -410,6 +426,11 @@ impl ProfileHarvester {
         client: Client,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         loop {
+            // Check for cancellation at the start of each loop iteration
+            if self.cancellation_token.is_cancelled() {
+                info!("Backward pagination cancelled for {}", self.relay_url);
+                break;
+            }
             // Get or initialize pagination state
             let (_window_start, start_time) = {
                 let state_guard = self.state.read().await;
@@ -724,8 +745,9 @@ impl ProfileHarvester {
         let event_count_clone = event_count.clone();
         let relay_url_for_tracking = relay_url.clone();
 
-        client
-            .handle_notifications(|notification| {
+        // Handle notifications with cancellation support
+        let result = tokio::select! {
+            result = client.handle_notifications(|notification| {
                 let cancellation_token = cancellation_token.clone();
                 let sub_id = sub_id.clone();
                 let validator = validator.clone();
@@ -798,8 +820,15 @@ impl ProfileHarvester {
 
                     Ok(false) // Continue processing
                 }
-            })
-            .await?;
+            }) => result,
+            _ = cancellation_token.cancelled() => {
+                info!("Real-time subscription cancelled for {}", relay_url);
+                Ok(())
+            }
+        };
+
+        // Ensure client is properly shut down
+        client.shutdown().await;
 
         let final_count = event_count.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -808,6 +837,6 @@ impl ProfileHarvester {
             relay_url, final_count
         );
 
-        Ok(())
+        result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 }

@@ -1,7 +1,7 @@
 //! Direct profile validation without worker pool
 
 use crate::profile_quality_filter::ProfileQualityFilter;
-use nostr_relay_builder::RelayDatabase;
+use nostr_relay_builder::DatabaseSender;
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
@@ -76,7 +76,7 @@ pub struct DelayedRetry {
 /// Direct profile validator without worker pool
 pub struct ProfileValidator {
     filter: Arc<ProfileQualityFilter>,
-    database: Arc<RelayDatabase>,
+    db_sender: DatabaseSender,
     gossip_client: Arc<Client>,
     metrics: Arc<ProfileValidatorMetrics>,
     delayed_retries: Arc<RwLock<Vec<DelayedRetry>>>,
@@ -86,12 +86,12 @@ impl ProfileValidator {
     /// Create a new profile validator
     pub fn new(
         filter: Arc<ProfileQualityFilter>,
-        database: Arc<RelayDatabase>,
+        db_sender: DatabaseSender,
         gossip_client: Arc<Client>,
     ) -> Self {
         Self {
             filter,
-            database,
+            db_sender,
             gossip_client,
             metrics: Arc::new(ProfileValidatorMetrics::default()),
             delayed_retries: Arc::new(RwLock::new(Vec::new())),
@@ -147,7 +147,7 @@ impl ProfileValidator {
 
                 // Save to database
                 for cmd in commands {
-                    if let Err(e) = self.database.save_store_command(cmd, None).await {
+                    if let Err(e) = self.db_sender.send(cmd).await {
                         warn!("Failed to save event: {}", e);
                     }
                 }

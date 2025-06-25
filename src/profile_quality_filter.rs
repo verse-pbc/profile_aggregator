@@ -3,7 +3,9 @@
 use crate::profile_image_validator::{ImageInfo, ProfileImageValidator};
 use crate::rate_limit_manager::RateLimitManager;
 use async_trait::async_trait;
-use nostr_relay_builder::{Error, EventContext, EventProcessor, RelayDatabase, StoreCommand};
+use nostr_relay_builder::{
+    Error, EventContext, EventProcessor, RelayDatabase, Result, StoreCommand,
+};
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
@@ -108,7 +110,7 @@ impl ProfileQualityFilter {
         &self,
         author: PublicKey,
         subdomain: &nostr_lmdb::Scope,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> std::result::Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let filter = Filter::new().author(author).kind(Kind::Metadata);
 
         let events = self
@@ -125,7 +127,7 @@ impl ProfileQualityFilter {
         &self,
         author: PublicKey,
         subdomain: &nostr_lmdb::Scope,
-    ) -> Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> std::result::Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
         if self.check_existing_metadata(author, subdomain).await? {
             let cleanup_filter = Filter::new().author(author);
             Ok(vec![StoreCommand::DeleteEvents(
@@ -143,7 +145,7 @@ impl ProfileQualityFilter {
         event: Event,
         subdomain: nostr_lmdb::Scope,
         gossip_client: &Client,
-    ) -> Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> std::result::Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
         self.apply_filter_internal(event, subdomain, Some(gossip_client))
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
@@ -154,7 +156,7 @@ impl ProfileQualityFilter {
         &self,
         event: Event,
         subdomain: nostr_lmdb::Scope,
-    ) -> Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> std::result::Result<Vec<StoreCommand>, Box<dyn std::error::Error + Send + Sync>> {
         self.apply_filter_internal(event, subdomain, None)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
@@ -166,7 +168,7 @@ impl ProfileQualityFilter {
         event: Event,
         subdomain: nostr_lmdb::Scope,
         gossip_client: Option<&Client>,
-    ) -> Result<Vec<StoreCommand>, ProfileValidationError> {
+    ) -> std::result::Result<Vec<StoreCommand>, ProfileValidationError> {
         // Handle relay list events (kind 10002) - only accept if the author has metadata
         if event.kind == Kind::Custom(10002) {
             // Check if this pubkey has existing metadata in the database
@@ -435,7 +437,8 @@ impl ProfileQualityFilter {
         &self,
         pubkey: PublicKey,
         client: &Client,
-    ) -> Result<(Vec<Event>, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> std::result::Result<(Vec<Event>, Vec<String>), Box<dyn std::error::Error + Send + Sync>>
+    {
         let mut all_events = Vec::new();
         let timeout = std::time::Duration::from_secs(5);
 
@@ -484,14 +487,15 @@ impl ProfileQualityFilter {
 }
 
 #[async_trait]
-impl EventProcessor<()> for ProfileQualityFilter {
+impl EventProcessor for ProfileQualityFilter {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: &mut (),
+        _custom_state: Arc<tokio::sync::RwLock<()>>,
         context: EventContext<'_>,
-    ) -> Result<Vec<StoreCommand>, Error> {
+    ) -> Result<Vec<StoreCommand>> {
         // No gossip client for inbound WebSocket events
+        // context.subdomain is already a &Scope, so we just need to clone it
         self.apply_filter(event, context.subdomain.clone())
             .await
             .map_err(|e| Error::internal(format!("Filter error: {}", e)))

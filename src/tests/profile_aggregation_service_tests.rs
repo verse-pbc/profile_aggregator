@@ -5,7 +5,7 @@ use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio_util::task::TaskTracker;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 async fn create_test_service() -> (ProfileAggregationService, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -13,8 +13,11 @@ async fn create_test_service() -> (ProfileAggregationService, TempDir) {
 
     let keys = Keys::generate();
     let task_tracker = TaskTracker::new();
+    let cancellation_token = CancellationToken::new();
     let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap());
+    let (database, db_sender) =
+        RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap();
+    let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
     let config = ProfileAggregationConfig {
@@ -26,9 +29,10 @@ async fn create_test_service() -> (ProfileAggregationService, TempDir) {
         max_backoff: Duration::from_secs(1),
     };
 
-    let service = ProfileAggregationService::new(config, filter, db)
-        .await
-        .unwrap();
+    let service =
+        ProfileAggregationService::new(config, filter, db_sender, cancellation_token, task_tracker)
+            .await
+            .unwrap();
 
     (service, temp_dir)
 }
@@ -71,8 +75,11 @@ async fn test_state_persistence() {
     // Create service with existing state
     let keys = Keys::generate();
     let task_tracker = TaskTracker::new();
+    let cancellation_token = CancellationToken::new();
     let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap());
+    let (database, db_sender) =
+        RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap();
+    let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
     let config = ProfileAggregationConfig {
@@ -84,9 +91,10 @@ async fn test_state_persistence() {
         max_backoff: Duration::from_secs(1),
     };
 
-    let _service = ProfileAggregationService::new(config, filter, db)
-        .await
-        .unwrap();
+    let _service =
+        ProfileAggregationService::new(config, filter, db_sender, cancellation_token, task_tracker)
+            .await
+            .unwrap();
 
     // State file should still exist
     assert!(state_file.exists());
@@ -128,8 +136,11 @@ async fn test_multiple_relay_configuration() {
 
     let keys = Keys::generate();
     let task_tracker = TaskTracker::new();
+    let cancellation_token = CancellationToken::new();
     let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-    let db = Arc::new(RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap());
+    let (database, db_sender) =
+        RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap();
+    let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
     let config = ProfileAggregationConfig {
@@ -145,9 +156,15 @@ async fn test_multiple_relay_configuration() {
         max_backoff: Duration::from_secs(1),
     };
 
-    let _service = ProfileAggregationService::new(config.clone(), filter, db)
-        .await
-        .unwrap();
+    let _service = ProfileAggregationService::new(
+        config.clone(),
+        filter,
+        db_sender,
+        cancellation_token,
+        task_tracker,
+    )
+    .await
+    .unwrap();
 
     // Verify service handles multiple relays
     assert_eq!(config.relay_urls.len(), 3);

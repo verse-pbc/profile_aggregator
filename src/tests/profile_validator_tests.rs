@@ -14,14 +14,15 @@ fn create_test_setup() -> (Arc<ProfileValidator>, Arc<RelayDatabase>, Cancellati
     let cancellation_token = CancellationToken::new();
     let task_tracker = TaskTracker::new();
     let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-    let db = Arc::new(RelayDatabase::new(temp_dir.path(), crypto_sender).unwrap());
+    let (database, db_sender) = RelayDatabase::new(temp_dir.path(), crypto_sender).unwrap();
+    let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
     // Create a gossip client for testing
     let keys = Keys::generate();
     let gossip_client = Arc::new(Client::new(keys));
 
-    let validator = Arc::new(ProfileValidator::new(filter, db.clone(), gossip_client));
+    let validator = Arc::new(ProfileValidator::new(filter, db_sender, gossip_client));
 
     (validator, db, cancellation_token)
 }
