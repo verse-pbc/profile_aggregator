@@ -264,16 +264,32 @@ impl ProfileAggregationService {
             }
         }
 
-        // Final save
-        let state_snapshot = self.state.read().await;
-        let _ = Self::save_state(&state_snapshot, &self.config.state_file).await;
+        self.shutdown().await;
 
         // Wait for all tasks
         for handle in relay_handles {
             let _ = handle.await;
         }
 
+        // Final save
+        let state_snapshot = self.state.read().await;
+        let _ = Self::save_state(&state_snapshot, &self.config.state_file).await;
+
         Ok(())
+    }
+
+    /// Shutdown the aggregation service and its resources
+    pub async fn shutdown(&self) {
+        info!("Shutting down profile aggregation service");
+
+        // Shutdown the validator which will close the gossip client
+        self.validator.shutdown().await;
+
+        // Final state save
+        let state_snapshot = self.state.read().await;
+        if let Err(e) = Self::save_state(&state_snapshot, &self.config.state_file).await {
+            error!("Failed to save final aggregation state: {}", e);
+        }
     }
 
     /// Save state to disk

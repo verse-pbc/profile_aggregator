@@ -336,11 +336,7 @@ fn select_least_shown_profiles(
     (results, not_selected)
 }
 
-async fn random_profiles_handler_impl(
-    _database: Arc<RelayDatabase>,
-    params: RandomQuery,
-    headers: HeaderMap,
-) -> Response {
+async fn random_profiles_handler_impl(params: RandomQuery, headers: HeaderMap) -> Response {
     // Cap the count at 500
     let count = params.count.min(500);
     info!("Random profiles requested: count={}", count);
@@ -400,72 +396,22 @@ async fn random_profiles_handler_impl(
     }
 }
 
-async fn cleanup_empty_picture_profiles(database: Arc<RelayDatabase>) -> Result<()> {
-    info!("Starting cleanup of profiles with empty pictures...");
-
-    // Query all metadata events
-    let filter = Filter::new().kind(Kind::Metadata);
-    let scope = nostr_lmdb::Scope::Default;
-    let events = database.query(vec![filter], &scope).await?;
-
-    let mut deleted_count = 0;
-    let mut checked_count = 0;
-
-    for event in events {
-        checked_count += 1;
-
-        // Parse the metadata
-        if let Ok(metadata) = serde_json::from_str::<
-            profile_aggregator::profile_quality_filter::NostrProfileData,
-        >(&event.content)
-        {
-            // Check if picture is empty or null
-            if metadata
-                .picture
-                .as_ref()
-                .map(|p| p.trim().is_empty())
-                .unwrap_or(true)
-            {
-                // Delete all events from this author
-                let delete_filter = Filter::new().author(event.pubkey);
-
-                if let Err(e) = database.delete(delete_filter, &scope).await {
-                    error!("Failed to delete profile {}: {}", event.pubkey, e);
-                } else {
-                    deleted_count += 1;
-                    if deleted_count % 100 == 0 {
-                        info!(
-                            "Deleted {} profiles with empty pictures so far...",
-                            deleted_count
-                        );
-                    }
-                }
-            }
-        }
-
-        if checked_count % 1000 == 0 {
-            info!("Checked {} profiles...", checked_count);
-        }
-    }
-
-    info!(
-        "Cleanup complete: checked {} profiles, deleted {} with empty pictures",
-        checked_count, deleted_count
-    );
-
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load environment variables
     dotenv::dotenv().ok();
 
-    // Setup logging
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("info,profile_aggregator=debug,nostr_relay_builder=debug")
-    });
-    fmt().with_env_filter(env_filter).with_target(true).init();
+    // Check if we should enable tokio-console
+    if std::env::var("TOKIO_CONSOLE").is_ok() {
+        console_subscriber::init();
+        info!("tokio-console enabled on port 6669");
+    } else {
+        // Setup normal logging if not using tokio-console
+        let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("info,profile_aggregator=debug,nostr_relay_builder=debug")
+        });
+        fmt().with_env_filter(env_filter).with_target(true).init();
+    }
 
     // Load relay keys from environment or use default dev key
     let relay_secret = std::env::var("RELAY_SECRET_KEY").unwrap_or_else(|_| {
@@ -483,17 +429,15 @@ async fn main() -> Result<()> {
 
     // The oldest timestamp will be discovered during the first cache refresh
 
-    // Create crypto worker and database with shared TaskTracker
+    // Create crypto worker and database with shared TaskTracker and CancellationToken
     let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-    let (database, db_sender) =
-        RelayDatabase::with_task_tracker(&database_path, crypto_sender, task_tracker.clone())?;
+    let (database, db_sender) = RelayDatabase::with_task_tracker_and_token(
+        &database_path,
+        crypto_sender.clone(),
+        task_tracker.clone(),
+        cancellation_token.clone(),
+    )?;
     let database = Arc::new(database);
-
-    // Run migration to clean up profiles with empty pictures
-    info!("Running migration to clean up profiles with empty pictures...");
-    if let Err(e) = cleanup_empty_picture_profiles(database.clone()).await {
-        error!("Failed to run migration: {}", e);
-    }
 
     // Initialize and periodically update profile count
     let database_clone = database.clone();
@@ -584,7 +528,11 @@ async fn main() -> Result<()> {
     // Configure the relay
     let relay_url =
         std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:8080".to_string());
-    let config = RelayConfig::new(&relay_url, (database.clone(), db_sender.clone()), keys);
+    let config = RelayConfig::new(
+        &relay_url,
+        (database.clone(), db_sender.clone(), crypto_sender),
+        keys,
+    );
 
     // Get discovery relay URLs
     let discovery_relay_urls = vec![std::env::var("DISCOVERY_RELAY_URL")
@@ -619,13 +567,13 @@ async fn main() -> Result<()> {
     };
 
     // Create shared filter for both WebSocket and aggregation service
-    let filter = Arc::new(ProfileQualityFilter::new(database.clone()));
+    let profile_quality_filter = Arc::new(ProfileQualityFilter::new(database));
 
     // Both services use the same filter
     let aggregation_service = ProfileAggregationService::new(
         aggregation_config,
-        filter.clone(),
-        db_sender.clone(),
+        profile_quality_filter.clone(),
+        db_sender,
         cancellation_token.clone(),
         task_tracker.clone(),
     )
@@ -645,29 +593,29 @@ async fn main() -> Result<()> {
     };
 
     // Build the WebSocket server without default HTML
-    let ws_handler = RelayBuilder::new(config.clone())
+    let relay_url = config.relay_url.clone();
+    let ws_handler = RelayBuilder::new(config)
         .without_html()
         .with_task_tracker(task_tracker.clone())
-        .with_event_processor(filter.as_ref().clone())
+        .with_event_processor(profile_quality_filter)
         .with_relay_info(relay_info.clone())
+        .with_cancellation_token(cancellation_token.clone())
         .build_axum()
         .await?;
 
     // Create custom root handler that combines WebSocket and HTML
     let root_handler = {
         let relay_info = relay_info.clone();
-        let relay_url = config.relay_url.clone();
-        let ws_handler = ws_handler.clone();
         move |ws: Option<axum::extract::WebSocketUpgrade>,
               ConnectInfo(addr): ConnectInfo<SocketAddr>,
               headers: HeaderMap| {
             let info = relay_info.clone();
             let url = relay_url.clone();
-            let ws_h = ws_handler.clone();
+            //let ws_h = ws_handler; //#.clone();
             async move {
                 // If it's a WebSocket upgrade, delegate to the WebSocket handler
                 if let Some(ws) = ws {
-                    return ws_h(Some(ws), ConnectInfo(addr), headers).await;
+                    return ws_handler(Some(ws), ConnectInfo(addr), headers).await;
                 }
 
                 // Check if client wants JSON (NIP-11)
@@ -688,14 +636,11 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Create HTTP server
-    // Clone database for the handler
-    let db_for_handler = database.clone();
-
     // Create the handler as a closure
-    let handler = move |Query(params): Query<RandomQuery>, headers: HeaderMap| {
-        let db = db_for_handler.clone();
-        async move { random_profiles_handler_impl(db, params, headers).await }
+    let handler = move |Query(params): Query<RandomQuery>, headers: HeaderMap| async move {
+        // The _database parameter in random_profiles_handler_impl is not used (prefixed with _)
+        // but we still need to pass it for the signature
+        random_profiles_handler_impl(params, headers).await
     };
 
     // Configure CORS
@@ -714,12 +659,16 @@ async fn main() -> Result<()> {
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     let addr: SocketAddr = bind_addr.parse()?;
 
+    // Store the aggregation service for shutdown
+    let aggregation_service = Arc::new(aggregation_service);
+
     // Spawn the aggregation service
     let aggregation_service_token = cancellation_token.clone();
-    let aggregation_handle = task_tracker.spawn(async move {
+    let aggregation_service_clone = aggregation_service.clone();
+    task_tracker.spawn(async move {
         info!("🔄 Starting profile aggregation service...");
         tokio::select! {
-            result = aggregation_service.run() => {
+            result = aggregation_service_clone.run() => {
                 if let Err(e) = result {
                     error!("Profile aggregation service error: {}", e);
                 }
@@ -728,6 +677,7 @@ async fn main() -> Result<()> {
                 info!("Profile aggregation service cancelled");
             }
         }
+        // aggregation_service_clone is automatically dropped here when going out of scope
     });
 
     // No need to periodically refresh - oldest timestamp is stable
@@ -751,9 +701,7 @@ async fn main() -> Result<()> {
     // Handle shutdown signal
     let shutdown_token = cancellation_token.clone();
 
-    let task_tracker_clone = task_tracker.clone();
     let shutdown_signal = async move {
-        task_tracker_clone.close();
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to install Ctrl+C handler");
@@ -764,35 +712,22 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     // Run server with graceful shutdown
-    let server = axum::serve(
+    axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal);
-
-    tokio::select! {
-        result = server => {
-            if let Err(e) = result {
-                error!("Server error: {}", e);
-            }
-        }
-        _ = aggregation_handle => {
-            info!("Profile aggregation service stopped");
-        }
-        _ = cancellation_token.cancelled() => {
-            info!("Cancellation requested");
-        }
-    }
+    .with_graceful_shutdown(shutdown_signal)
+    .await?;
 
     info!("Server stopped, shutting down services...");
 
-    // Clean up resources
-    drop(db_sender);
-    drop(filter);
-    drop(config);
-    drop(ws_handler);
+    // Signal all services to shutdown
+    cancellation_token.cancel();
 
-    info!("Waiting for background tasks...");
+    // Close the task tracker to prevent new tasks from being spawned
+    task_tracker.close();
+
+    info!("All resources dropped, waiting for background tasks...");
     match tokio::time::timeout(Duration::from_secs(30), task_tracker.wait()).await {
         Ok(()) => info!("All background tasks completed successfully"),
         Err(_) => {
@@ -1049,9 +984,11 @@ mod tests {
         let task_tracker = tokio_util::task::TaskTracker::new();
         let crypto_sender =
             nostr_relay_builder::CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-        let (database, db_sender) =
-            nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap(), crypto_sender)
-                .unwrap();
+        let (database, db_sender) = nostr_relay_builder::RelayDatabase::new(
+            db_path.to_str().unwrap(),
+            crypto_sender.clone(),
+        )
+        .unwrap();
         let database = Arc::new(database);
 
         // Create profiles spread across time

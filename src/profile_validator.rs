@@ -98,6 +98,12 @@ impl ProfileValidator {
         }
     }
 
+    /// Shutdown the validator and its resources
+    pub async fn shutdown(&self) {
+        debug!("Shutting down profile validator");
+        self.gossip_client.shutdown().await;
+    }
+
     /// Process a batch of profile events
     pub async fn process_profiles(
         &self,
