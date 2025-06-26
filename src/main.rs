@@ -120,11 +120,10 @@ async fn refresh_random_profiles_cache(database: Arc<RelayDatabase>) -> Result<(
         (now, true)
     } else {
         // For refresh, pick a random window
-        use rand::Rng;
-        use rand::SeedableRng;
-        let mut rng = rand::rngs::StdRng::from_entropy();
+        use ::rand::Rng;
+        let mut rng = ::rand::rngs::ThreadRng::default();
         let oldest = cached_oldest.unwrap();
-        let random_ts = rng.gen_range(oldest..=now.as_u64());
+        let random_ts = rng.random_range(oldest..=now.as_u64());
         (Timestamp::from(random_ts), false)
     };
 
@@ -279,9 +278,8 @@ fn select_least_shown_profiles(
     max_count: usize,
     least_shown_tracker: &TopK<Vec<u8>>,
 ) -> (Vec<ProfileWithRelays>, Vec<usize>) {
-    use rand::seq::SliceRandom;
-    use rand::SeedableRng;
-    let mut rng = rand::rngs::StdRng::from_entropy();
+    use ::rand::seq::SliceRandom;
+    let mut rng = ::rand::rng();
 
     // Get the least shown profiles from HeavyKeeper
     let least_shown_list = least_shown_tracker.list();
