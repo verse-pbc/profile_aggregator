@@ -752,7 +752,10 @@ async fn main() -> Result<()> {
 
     // Handle shutdown signal
     let shutdown_token = cancellation_token.clone();
+
+    let task_tracker_clone = task_tracker.clone();
     let shutdown_signal = async move {
+        task_tracker_clone.close();
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to install Ctrl+C handler");
@@ -790,9 +793,6 @@ async fn main() -> Result<()> {
     drop(filter);
     drop(config);
     drop(ws_handler);
-
-    // Close the TaskTracker and wait for all background tasks
-    task_tracker.close();
 
     info!("Waiting for background tasks...");
     match tokio::time::timeout(Duration::from_secs(30), task_tracker.wait()).await {
