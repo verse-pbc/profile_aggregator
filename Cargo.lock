@@ -434,7 +434,7 @@ dependencies = [
  "bitflags 2.9.1",
  "cexpr",
  "clang-sys",
- "itertools",
+ "itertools 0.12.1",
  "lazy_static",
  "lazycell",
  "log",
@@ -1337,7 +1337,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "http",
- "indexmap 2.9.0",
+ "indexmap 2.10.0",
  "slab",
  "tokio",
  "tokio-util",
@@ -1872,9 +1872,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.9.0"
+version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cea70ddb795996207ad57735b50c5982d8844f38ba9ee5f1aedcfb708a2aa11e"
+checksum = "fe4cd85333e22411419a0bcae1297d25e58c9443848b11dc6a86fefe8c78a661"
 dependencies = [
  "equivalent",
  "hashbrown 0.15.4",
@@ -1965,6 +1965,15 @@ name = "itertools"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
 dependencies = [
  "either",
 ]
@@ -2281,6 +2290,7 @@ checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 [[package]]
 name = "nostr"
 version = "0.42.0"
+source = "git+https://github.com/verse-pbc/nostr#98239f3a9fe758d351ad956f292ef698d1ac8337"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -2309,6 +2319,7 @@ dependencies = [
 [[package]]
 name = "nostr-database"
 version = "0.42.0"
+source = "git+https://github.com/verse-pbc/nostr#98239f3a9fe758d351ad956f292ef698d1ac8337"
 dependencies = [
  "flatbuffers",
  "lru",
@@ -2319,6 +2330,7 @@ dependencies = [
 [[package]]
 name = "nostr-lmdb"
 version = "0.42.0"
+source = "git+https://github.com/verse-pbc/nostr#98239f3a9fe758d351ad956f292ef698d1ac8337"
 dependencies = [
  "async-utility",
  "flatbuffers",
@@ -2335,6 +2347,7 @@ dependencies = [
 [[package]]
 name = "nostr-relay-pool"
 version = "0.42.0"
+source = "git+https://github.com/verse-pbc/nostr#98239f3a9fe758d351ad956f292ef698d1ac8337"
 dependencies = [
  "async-utility",
  "async-wsocket",
@@ -2350,6 +2363,7 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.42.0"
+source = "git+https://github.com/verse-pbc/nostr#98239f3a9fe758d351ad956f292ef698d1ac8337"
 dependencies = [
  "async-utility",
  "nostr",
@@ -2362,6 +2376,7 @@ dependencies = [
 [[package]]
 name = "nostr_relay_builder"
 version = "0.4.1"
+source = "git+https://github.com/verse-pbc/nostr_relay_builder?branch=main#8acd911d2c8a5dd24f373b52b93cf587bc246d9f"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2760,7 +2775,7 @@ checksum = "5676d703dda103cbb035b653a9f11448c0a7216c7926bd35fcb5865475d0c970"
 dependencies = [
  "autocfg",
  "equivalent",
- "indexmap 2.9.0",
+ "indexmap 2.10.0",
 ]
 
 [[package]]
@@ -2847,7 +2862,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -3035,7 +3050,7 @@ dependencies = [
  "built",
  "cfg-if",
  "interpolate_name",
- "itertools",
+ "itertools 0.12.1",
  "libc",
  "libfuzzer-sys",
  "log",
@@ -3994,7 +4009,7 @@ version = "0.22.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
 dependencies = [
- "indexmap 2.9.0",
+ "indexmap 2.10.0",
  "serde",
  "serde_spanned",
  "toml_datetime",
@@ -4524,6 +4539,7 @@ dependencies = [
 [[package]]
 name = "websocket_builder"
 version = "0.1.0-alpha.1"
+source = "git+https://github.com/verse-pbc/websocket_builder#57cb7062ee5c0ecb22098fe703c270098821dfca"
 dependencies = [
  "anyhow",
  "async-trait",

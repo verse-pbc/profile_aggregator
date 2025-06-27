@@ -34,14 +34,14 @@ impl fmt::Display for ProfileValidationError {
                 retry_after,
             } => {
                 if let Some(seconds) = retry_after {
-                    write!(f, "Rate limited by {}: retry after {}s", domain, seconds)
+                    write!(f, "Rate limited by {domain}: retry after {seconds}s")
                 } else {
-                    write!(f, "Rate limited by {}", domain)
+                    write!(f, "Rate limited by {domain}")
                 }
             }
-            Self::InvalidImage(msg) => write!(f, "Invalid image: {}", msg),
-            Self::InvalidProfile(msg) => write!(f, "Invalid profile: {}", msg),
-            Self::NetworkError(msg) => write!(f, "Network error: {}", msg),
+            Self::InvalidImage(msg) => write!(f, "Invalid image: {msg}"),
+            Self::InvalidProfile(msg) => write!(f, "Invalid profile: {msg}"),
+            Self::NetworkError(msg) => write!(f, "Network error: {msg}"),
         }
     }
 }
@@ -117,7 +117,7 @@ impl ProfileQualityFilter {
             .database
             .query(vec![filter], subdomain)
             .await
-            .map_err(|e| format!("Failed to query database: {}", e))?;
+            .map_err(|e| format!("Failed to query database: {e}"))?;
 
         Ok(!events.is_empty())
     }
@@ -487,7 +487,7 @@ impl ProfileQualityFilter {
 }
 
 #[async_trait]
-impl EventProcessor for ProfileQualityFilter {
+impl EventProcessor<()> for ProfileQualityFilter {
     async fn handle_event(
         &self,
         event: Event,
@@ -498,6 +498,6 @@ impl EventProcessor for ProfileQualityFilter {
         // context.subdomain is already a &Scope, so we just need to clone it
         self.apply_filter(event, context.subdomain.clone())
             .await
-            .map_err(|e| Error::internal(format!("Filter error: {}", e)))
+            .map_err(|e| Error::internal(format!("Filter error: {e}")))
     }
 }

@@ -137,7 +137,7 @@ impl RateLimitManager {
             let requests_per_minute = (60.0 / seconds.max(1) as f64).ceil() as u32;
             (
                 Quota::per_minute(NonZeroU32::new(requests_per_minute.max(1)).unwrap()),
-                format!("{}s (from header)", seconds),
+                format!("{seconds}s (from header)"),
             )
         } else {
             // Exponential backoff starting from 30s: 30s, 60s, 120s, 240s...

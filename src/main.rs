@@ -32,7 +32,7 @@ fn render_index_html(info: &RelayInfo, websocket_url: &str) -> String {
     let supported_nips = info
         .supported_nips
         .iter()
-        .map(|nip| format!(r#"<span class="nip">NIP-{:02}</span>"#, nip))
+        .map(|nip| format!(r#"<span class="nip">NIP-{nip:02}</span>"#))
         .collect::<Vec<_>>()
         .join("\n                    ");
 
@@ -594,10 +594,10 @@ async fn main() -> Result<()> {
 
     // Build the WebSocket server without default HTML
     let relay_url = config.relay_url.clone();
-    let ws_handler = RelayBuilder::new(config)
+    let ws_handler = RelayBuilder::<()>::new(config)
         .without_html()
         .with_task_tracker(task_tracker.clone())
-        .with_event_processor(profile_quality_filter)
+        .with_event_processor::<ProfileQualityFilter>(profile_quality_filter)
         .with_relay_info(relay_info.clone())
         .with_cancellation_token(cancellation_token.clone())
         .build_axum()
@@ -683,7 +683,7 @@ async fn main() -> Result<()> {
     // No need to periodically refresh - oldest timestamp is stable
 
     println!("\nProfile Aggregator starting");
-    println!("WebSocket: ws://{}", addr);
+    println!("WebSocket: ws://{addr}");
     println!("\nFetching user profiles (kind 0)");
     println!("\nDiscovery relay: {}", discovery_relay_urls.join(", "));
     println!("\nProfile requirements:");
@@ -693,10 +693,10 @@ async fn main() -> Result<()> {
     println!("- Verified: published text note via outbox relays");
     println!("- Excludes: bridges, mostr accounts, profiles with fields array");
     println!("\nConfiguration:");
-    println!("- Page size: {} events", page_size);
-    println!("- Backoff: {}s-{}s", initial_backoff_secs, max_backoff_secs);
-    println!("- Database: {}", database_path);
-    println!("- State: {}", state_file);
+    println!("- Page size: {page_size} events");
+    println!("- Backoff: {initial_backoff_secs}s-{max_backoff_secs}s");
+    println!("- Database: {database_path}");
+    println!("- State: {state_file}");
 
     // Handle shutdown signal
     let shutdown_token = cancellation_token.clone();
@@ -834,8 +834,7 @@ mod tests {
         for (i, profile) in profiles.iter().enumerate().take(5) {
             assert!(
                 selected_pubkeys.contains(&profile.profile.pubkey),
-                "High priority profile {} should be selected",
-                i
+                "High priority profile {i} should be selected"
             );
         }
     }

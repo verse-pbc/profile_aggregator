@@ -28,10 +28,7 @@ fn create_test_setup() -> (Arc<ProfileValidator>, Arc<RelayDatabase>, Cancellati
 }
 
 fn create_test_profile_event(name: &str, about: &str, picture: &str) -> Event {
-    let content = format!(
-        r#"{{"name":"{}","about":"{}","picture":"{}"}}"#,
-        name, about, picture
-    );
+    let content = format!(r#"{{"name":"{name}","about":"{about}","picture":"{picture}"}}"#);
     let keys = Keys::generate();
     EventBuilder::new(Kind::Metadata, content)
         .sign_with_keys(&keys)

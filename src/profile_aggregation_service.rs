@@ -244,7 +244,7 @@ impl ProfileAggregationService {
                             "Recently rate-limited domains (last 5 min): {}",
                             metrics.top_rate_limited_domains
                                 .iter()
-                                .map(|(domain, count)| format!("{}: {}", domain, count))
+                                .map(|(domain, count)| format!("{domain}: {count}"))
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         );
@@ -588,8 +588,7 @@ impl ProfileHarvester {
 
                     if consecutive_errors >= 3 {
                         return Err(Box::new(std::io::Error::other(format!(
-                            "Failed after {} consecutive errors",
-                            consecutive_errors
+                            "Failed after {consecutive_errors} consecutive errors"
                         ))));
                     }
 

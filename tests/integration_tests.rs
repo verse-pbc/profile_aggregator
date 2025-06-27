@@ -125,8 +125,7 @@ async fn test_concurrent_event_processing() {
     for i in 0..10 {
         let handle = tokio::spawn(async move {
             let content = format!(
-                r#"{{"name":"User{}","about":"About user {}","picture":"https://example.com/{}.jpg"}}"#,
-                i, i, i
+                r#"{{"name":"User{i}","about":"About user {i}","picture":"https://example.com/{i}.jpg"}}"#
             );
             let keys = Keys::generate();
             EventBuilder::new(Kind::Metadata, content)

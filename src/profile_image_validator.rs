@@ -38,20 +38,20 @@ pub enum ValidationError {
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ValidationError::NetworkError(msg) => write!(f, "Network error: {}", msg),
+            ValidationError::NetworkError(msg) => write!(f, "Network error: {msg}"),
             ValidationError::RateLimited { domain, wait_time } => match wait_time {
                 Some(duration) => {
-                    write!(f, "Rate limited by {}: retry after {:?}", domain, duration)
+                    write!(f, "Rate limited by {domain}: retry after {duration:?}")
                 }
-                None => write!(f, "Rate limited by {}", domain),
+                None => write!(f, "Rate limited by {domain}"),
             },
-            ValidationError::InvalidImage(msg) => write!(f, "Invalid image: {}", msg),
-            ValidationError::TooLarge(size) => write!(f, "Image too large: {} bytes", size),
+            ValidationError::InvalidImage(msg) => write!(f, "Invalid image: {msg}"),
+            ValidationError::TooLarge(size) => write!(f, "Image too large: {size} bytes"),
             ValidationError::TooSmall { width, height } => {
-                write!(f, "Image too small: {}x{}", width, height)
+                write!(f, "Image too small: {width}x{height}")
             }
             ValidationError::AnimationNotAllowed => write!(f, "Animated images not allowed"),
-            ValidationError::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            ValidationError::ParseError(msg) => write!(f, "Parse error: {msg}"),
         }
     }
 }
