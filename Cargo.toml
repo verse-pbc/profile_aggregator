@@ -58,6 +58,9 @@ governor = "0.10"
 # Random number generation
 rand = "0.9"
 
+# Sync primitives
+parking_lot = "0.12"
+
 # Top-K tracking
 heavykeeper = "0.2"
 

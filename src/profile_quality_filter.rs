@@ -7,6 +7,7 @@ use nostr_relay_builder::{
     Error, EventContext, EventProcessor, RelayDatabase, Result, StoreCommand,
 };
 use nostr_sdk::prelude::*;
+use parking_lot;
 use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
 use std::fmt;
@@ -133,6 +134,7 @@ impl ProfileQualityFilter {
             Ok(vec![StoreCommand::DeleteEvents(
                 cleanup_filter,
                 subdomain.clone(),
+                None,
             )])
         } else {
             Ok(vec![])
@@ -180,6 +182,7 @@ impl ProfileQualityFilter {
                 return Ok(vec![StoreCommand::SaveSignedEvent(
                     Box::new(event),
                     subdomain,
+                    None,
                 )]);
             } else {
                 debug!("Rejecting relay list - no metadata exists for pubkey");
@@ -344,6 +347,7 @@ impl ProfileQualityFilter {
                     let mut commands = vec![StoreCommand::SaveSignedEvent(
                         Box::new(event.clone()),
                         subdomain.clone(),
+                        None,
                     )];
 
                     // Add relay events since profile was accepted
@@ -356,6 +360,7 @@ impl ProfileQualityFilter {
                         commands.push(StoreCommand::SaveSignedEvent(
                             Box::new(relay_event),
                             subdomain.clone(),
+                            None,
                         ));
                     }
 
@@ -491,7 +496,7 @@ impl EventProcessor<()> for ProfileQualityFilter {
     async fn handle_event(
         &self,
         event: Event,
-        _custom_state: Arc<tokio::sync::RwLock<()>>,
+        _custom_state: Arc<parking_lot::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>> {
         // No gossip client for inbound WebSocket events

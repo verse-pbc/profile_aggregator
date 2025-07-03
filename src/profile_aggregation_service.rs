@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::{interval, sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -340,6 +340,19 @@ impl ProfileHarvester {
                 }
                 Err(e) => {
                     error!("Profile aggregation failed for {}: {}", self.relay_url, e);
+
+                    // If this is a connection error, wait longer before retrying
+                    let error_str = e.to_string();
+                    if error_str.contains("No relays available")
+                        || error_str.contains("Failed to connect")
+                        || error_str.contains("connection lost")
+                    {
+                        warn!(
+                            "Connection issue detected for {}, using longer backoff",
+                            self.relay_url
+                        );
+                        sleep(Duration::from_secs(60)).await;
+                    }
                 }
             }
 
@@ -391,7 +404,28 @@ impl ProfileHarvester {
         client.add_relay(&self.relay_url).await?;
         client.connect().await;
 
-        sleep(Duration::from_secs(2)).await;
+        // Wait for actual connection establishment
+        let start = Instant::now();
+        let connection_timeout = Duration::from_secs(10);
+
+        loop {
+            if let Ok(relay) = client.pool().relay(&self.relay_url).await {
+                if relay.is_connected() {
+                    info!("Successfully connected to {}", self.relay_url);
+                    break;
+                }
+            }
+
+            if start.elapsed() > connection_timeout {
+                return Err(format!(
+                    "Failed to connect to {} within {:?}",
+                    self.relay_url, connection_timeout
+                )
+                .into());
+            }
+
+            sleep(Duration::from_millis(100)).await;
+        }
 
         // Record the timestamp when we start to ensure no gaps
         let realtime_start = Timestamp::now();
@@ -505,6 +539,9 @@ impl ProfileHarvester {
             if self.cancellation_token.is_cancelled() {
                 break;
             }
+
+            // Wait a minute before continuing
+            sleep(Duration::from_secs(60)).await;
         }
 
         Ok(())
@@ -581,6 +618,35 @@ impl ProfileHarvester {
                 }
                 Err(e) => {
                     consecutive_errors += 1;
+                    let error_str = e.to_string();
+
+                    // Special handling for "no relays" errors
+                    if error_str.contains("No relays available")
+                        || error_str.contains("no relays specified")
+                    {
+                        warn!(
+                            "Relay connection issue for {} (attempt {}): {}",
+                            self.relay_url, consecutive_errors, e
+                        );
+
+                        // Give it more attempts for connection issues
+                        if consecutive_errors >= 10 {
+                            error!(
+                                "Giving up on {} after {} connection attempts",
+                                self.relay_url, consecutive_errors
+                            );
+                            return Err(Box::new(std::io::Error::other(format!(
+                                "Connection failed after {consecutive_errors} attempts"
+                            ))));
+                        }
+
+                        // Longer backoff for connection issues
+                        let backoff = Duration::from_secs(60);
+                        info!("Waiting {} seconds before retry...", backoff.as_secs());
+                        sleep(backoff).await;
+                        continue;
+                    }
+
                     error!(
                         "Failed to fetch page from {}: {} (attempt {})",
                         self.relay_url, e, consecutive_errors
@@ -688,6 +754,54 @@ impl ProfileHarvester {
         let mut all_events = Vec::new();
         let timeout = Duration::from_secs(30);
 
+        // Check connection status before streaming
+        if let Ok(relay) = client.pool().relay(&self.relay_url).await {
+            if !relay.is_connected() {
+                warn!(
+                    "Relay {} disconnected, attempting to reconnect",
+                    self.relay_url
+                );
+                client.pool().connect_relay(&self.relay_url).await?;
+
+                // Wait briefly for reconnection
+                let mut reconnected = false;
+                for _ in 0..10 {
+                    sleep(Duration::from_millis(100)).await;
+                    if relay.is_connected() {
+                        reconnected = true;
+                        info!("Successfully reconnected to {}", self.relay_url);
+                        break;
+                    }
+                }
+
+                if !reconnected {
+                    warn!(
+                        "Failed to reconnect to relay: {} - continuing anyway",
+                        self.relay_url
+                    );
+                    // Don't fail - just continue and let stream_events handle it
+                }
+            }
+        } else {
+            // Relay not in pool - try to re-add it
+            warn!(
+                "Relay {} not found in pool, attempting to re-add",
+                self.relay_url
+            );
+            match client.add_relay(&self.relay_url).await {
+                Ok(_) => {
+                    info!("Re-added relay {} to pool", self.relay_url);
+                    client.pool().connect_relay(&self.relay_url).await.ok();
+                    // Give it a moment to connect
+                    sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    warn!("Failed to re-add relay {} to pool: {}", self.relay_url, e);
+                    // Don't fail - continue and let stream_events return empty
+                }
+            }
+        }
+
         for filter in filters {
             match tokio::time::timeout(
                 timeout + Duration::from_secs(10),
@@ -701,6 +815,31 @@ impl ProfileHarvester {
                     }
                 }
                 Ok(Err(e)) => {
+                    // Check if this is a "no relays specified" error
+                    if e.to_string().contains("no relays specified") {
+                        // Log detailed connection status
+                        if let Ok(relay) = client.pool().relay(&self.relay_url).await {
+                            let status = relay.status();
+                            warn!(
+                                "NoRelaysSpecified error - relay status: {:?} for {}",
+                                status, self.relay_url
+                            );
+                        } else {
+                            warn!(
+                                "NoRelaysSpecified error - relay not found in pool: {}",
+                                self.relay_url
+                            );
+                            // Try to re-add the relay to the pool
+                            if let Err(add_err) = client.add_relay(&self.relay_url).await {
+                                error!("Failed to re-add relay {}: {}", self.relay_url, add_err);
+                            } else {
+                                info!("Re-added relay {} to pool", self.relay_url);
+                                client.connect_relay(&self.relay_url).await.ok();
+                            }
+                        }
+                        // Don't return an error - just skip this filter
+                        continue;
+                    }
                     warn!("Failed to create stream: {}", e);
                 }
                 Err(_) => {

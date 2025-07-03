@@ -2376,7 +2376,7 @@ dependencies = [
 [[package]]
 name = "nostr_relay_builder"
 version = "0.4.1"
-source = "git+https://github.com/verse-pbc/nostr_relay_builder?branch=main#8acd911d2c8a5dd24f373b52b93cf587bc246d9f"
+source = "git+https://github.com/verse-pbc/nostr_relay_builder?branch=main#58f52a8f60acbc68ddbd5d298071b2f99032fdd8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2384,6 +2384,7 @@ dependencies = [
  "axum-server",
  "chrono",
  "clap",
+ "dashmap",
  "flume",
  "futures-util",
  "indicatif",
@@ -2392,6 +2393,7 @@ dependencies = [
  "nostr-lmdb",
  "nostr-sdk",
  "once_cell",
+ "parking_lot",
  "rand 0.8.5",
  "rustls",
  "serde",
@@ -2812,6 +2814,7 @@ dependencies = [
  "nostr-lmdb",
  "nostr-sdk",
  "nostr_relay_builder",
+ "parking_lot",
  "rand 0.9.1",
  "reqwest",
  "rustls",
@@ -4539,7 +4542,7 @@ dependencies = [
 [[package]]
 name = "websocket_builder"
 version = "0.1.0-alpha.1"
-source = "git+https://github.com/verse-pbc/websocket_builder#57cb7062ee5c0ecb22098fe703c270098821dfca"
+source = "git+https://github.com/verse-pbc/websocket_builder#71b21b4b48bf000fe52e979498931dc7b5f51a6d"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4547,6 +4550,7 @@ dependencies = [
  "flume",
  "futures-util",
  "hickory-resolver",
+ "parking_lot",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",

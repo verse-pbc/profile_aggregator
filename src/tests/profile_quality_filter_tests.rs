@@ -1,16 +1,13 @@
 use crate::profile_quality_filter::{NostrProfileData, ProfileQualityFilter};
-use nostr_relay_builder::{CryptoWorker, RelayDatabase};
+use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio_util::task::TaskTracker;
 
 fn create_test_database() -> Arc<RelayDatabase> {
     let temp_dir = TempDir::new().unwrap();
     let keys = Keys::generate();
-    let task_tracker = TaskTracker::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
-    let (database, _db_sender) = RelayDatabase::new(temp_dir.path(), crypto_sender).unwrap();
+    let (database, _db_sender) = RelayDatabase::new(temp_dir.path(), Arc::new(keys)).unwrap();
     Arc::new(database)
 }
 

@@ -7,7 +7,7 @@ use axum::{
     Router,
 };
 use heavykeeper::TopK;
-use nostr_relay_builder::{CryptoWorker, RelayBuilder, RelayConfig, RelayDatabase, RelayInfo};
+use nostr_relay_builder::{CryptoHelper, RelayBuilder, RelayConfig, RelayDatabase, RelayInfo};
 use nostr_sdk::prelude::*;
 use profile_aggregator::{
     ProfileAggregationConfig, ProfileAggregationService, ProfileQualityFilter,
@@ -429,14 +429,16 @@ async fn main() -> Result<()> {
 
     // The oldest timestamp will be discovered during the first cache refresh
 
-    // Create crypto worker and database with shared TaskTracker and CancellationToken
-    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
+    // Create database with shared TaskTracker and CancellationToken
     let (database, db_sender) = RelayDatabase::with_task_tracker_and_token(
         &database_path,
-        crypto_sender.clone(),
+        Arc::new(keys.clone()),
         task_tracker.clone(),
         cancellation_token.clone(),
     )?;
+
+    // Create CryptoHelper for the config
+    let crypto_helper = CryptoHelper::new(Arc::new(keys.clone()));
     let database = Arc::new(database);
 
     // Initialize and periodically update profile count
@@ -530,7 +532,7 @@ async fn main() -> Result<()> {
         std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:8080".to_string());
     let config = RelayConfig::new(
         &relay_url,
-        (database.clone(), db_sender.clone(), crypto_sender),
+        (database.clone(), db_sender.clone(), crypto_helper),
         keys,
     );
 
@@ -883,11 +885,9 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("test.db");
         let keys = Keys::generate();
-        let task_tracker = tokio_util::task::TaskTracker::new();
-        let crypto_sender =
-            nostr_relay_builder::CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
+        let _task_tracker = tokio_util::task::TaskTracker::new();
         let (database, db_sender) =
-            nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap(), crypto_sender)
+            nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap(), Arc::new(keys))
                 .unwrap();
         let database = Arc::new(database);
 
@@ -980,14 +980,10 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("test.db");
         let keys = Keys::generate();
-        let task_tracker = tokio_util::task::TaskTracker::new();
-        let crypto_sender =
-            nostr_relay_builder::CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-        let (database, db_sender) = nostr_relay_builder::RelayDatabase::new(
-            db_path.to_str().unwrap(),
-            crypto_sender.clone(),
-        )
-        .unwrap();
+        let _task_tracker = tokio_util::task::TaskTracker::new();
+        let (database, db_sender) =
+            nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap(), Arc::new(keys))
+                .unwrap();
         let database = Arc::new(database);
 
         // Create profiles spread across time

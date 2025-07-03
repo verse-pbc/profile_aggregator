@@ -1,6 +1,6 @@
 use crate::profile_quality_filter::ProfileQualityFilter;
 use crate::profile_validator::{ProfileValidator, ProfileValidatorMetricsSnapshot};
-use nostr_relay_builder::{CryptoWorker, RelayDatabase};
+use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,9 +12,9 @@ fn create_test_setup() -> (Arc<ProfileValidator>, Arc<RelayDatabase>, Cancellati
     let temp_dir = TempDir::new().unwrap();
     let keys = Keys::generate();
     let cancellation_token = CancellationToken::new();
-    let task_tracker = TaskTracker::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::new(keys.clone()), &task_tracker);
-    let (database, db_sender) = RelayDatabase::new(temp_dir.path(), crypto_sender).unwrap();
+    let _task_tracker = TaskTracker::new();
+    let (database, db_sender) =
+        RelayDatabase::new(temp_dir.path(), Arc::new(keys.clone())).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 

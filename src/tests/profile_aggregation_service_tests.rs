@@ -1,6 +1,6 @@
 use crate::profile_aggregation_service::{ProfileAggregationConfig, ProfileAggregationService};
 use crate::profile_quality_filter::ProfileQualityFilter;
-use nostr_relay_builder::{CryptoWorker, RelayDatabase};
+use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,9 +14,8 @@ async fn create_test_service() -> (ProfileAggregationService, TempDir) {
     let keys = Keys::generate();
     let task_tracker = TaskTracker::new();
     let cancellation_token = CancellationToken::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
     let (database, db_sender) =
-        RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap();
+        RelayDatabase::new(temp_dir.path().join("db"), Arc::new(keys)).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
@@ -76,9 +75,8 @@ async fn test_state_persistence() {
     let keys = Keys::generate();
     let task_tracker = TaskTracker::new();
     let cancellation_token = CancellationToken::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
     let (database, db_sender) =
-        RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap();
+        RelayDatabase::new(temp_dir.path().join("db"), Arc::new(keys)).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
@@ -137,9 +135,8 @@ async fn test_multiple_relay_configuration() {
     let keys = Keys::generate();
     let task_tracker = TaskTracker::new();
     let cancellation_token = CancellationToken::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
     let (database, db_sender) =
-        RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap();
+        RelayDatabase::new(temp_dir.path().join("db"), Arc::new(keys)).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 

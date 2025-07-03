@@ -1,4 +1,4 @@
-use nostr_relay_builder::{CryptoWorker, RelayDatabase};
+use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
 use profile_aggregator::{
     ProfileAggregationConfig, ProfileAggregationService, ProfileQualityFilter,
@@ -18,9 +18,8 @@ async fn test_real_time_subscription_integration() {
 
     let keys = Keys::generate();
     let task_tracker = TaskTracker::new();
-    let crypto_sender = CryptoWorker::spawn(Arc::new(keys), &task_tracker);
     let (database, db_sender) =
-        RelayDatabase::new(temp_dir.path().join("db"), crypto_sender).unwrap();
+        RelayDatabase::new(temp_dir.path().join("db"), Arc::new(keys)).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
