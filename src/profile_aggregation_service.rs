@@ -465,8 +465,8 @@ impl ProfileHarvester {
             }
         };
 
-        // Ensure client is properly shut down
-        client.shutdown().await;
+        // Don't shutdown the client here - it's still being used by the real-time subscription
+        // The client will be dropped when both the pagination and real-time subscription finish
 
         result
     }
@@ -981,8 +981,7 @@ impl ProfileHarvester {
             }
         };
 
-        // Ensure client is properly shut down
-        client.shutdown().await;
+        // Don't shutdown the client - let it be dropped naturally when all references are gone
 
         let final_count = event_count.load(std::sync::atomic::Ordering::Relaxed);
 
