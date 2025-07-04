@@ -70,6 +70,7 @@ pub struct ProfileQualityFilter {
     database: Arc<RelayDatabase>,
     skip_mostr: bool,
     skip_fields: bool,
+    gossip_client: Option<Arc<Client>>,
 }
 
 impl fmt::Debug for ProfileQualityFilter {
@@ -78,6 +79,7 @@ impl fmt::Debug for ProfileQualityFilter {
             .field("image_validator", &"ProfileImageValidator")
             .field("skip_mostr", &self.skip_mostr)
             .field("skip_fields", &self.skip_fields)
+            .field("gossip_client", &self.gossip_client.is_some())
             .finish()
     }
 }
@@ -103,6 +105,33 @@ impl ProfileQualityFilter {
             database,
             skip_mostr,
             skip_fields,
+            gossip_client: None,
+        }
+    }
+
+    /// Create a new profile quality filter with a gossip client
+    pub fn with_gossip_client(
+        database: Arc<RelayDatabase>,
+        skip_mostr: bool,
+        skip_fields: bool,
+        gossip_client: Arc<Client>,
+    ) -> Self {
+        let rate_limit_manager = Arc::new(RateLimitManager::new());
+        Self {
+            // Single image validator with shared rate limiter
+            image_validator: Arc::new(
+                ProfileImageValidator::with_rate_limiter(
+                    300,  // min_width
+                    600,  // min_height
+                    true, // allow_animated
+                    rate_limit_manager,
+                )
+                .expect("Failed to create ProfileImageValidator"),
+            ),
+            database,
+            skip_mostr,
+            skip_fields,
+            gossip_client: Some(gossip_client),
         }
     }
 
@@ -499,10 +528,30 @@ impl EventProcessor<()> for ProfileQualityFilter {
         _custom_state: Arc<parking_lot::RwLock<()>>,
         context: EventContext<'_>,
     ) -> Result<Vec<StoreCommand>> {
-        // No gossip client for inbound WebSocket events
+        // Use the stored gossip client if available
         // context.subdomain is already a &Scope, so we just need to clone it
-        self.apply_filter(event, context.subdomain.clone())
-            .await
-            .map_err(|e| Error::internal(format!("Filter error: {e}")))
+        let result = if let Some(ref gossip_client) = self.gossip_client {
+            self.apply_filter_with_gossip(event.clone(), context.subdomain.clone(), gossip_client)
+                .await
+        } else {
+            self.apply_filter(event.clone(), context.subdomain.clone())
+                .await
+        };
+
+        match result {
+            Ok(commands) => {
+                // If no commands are returned, the event was rejected
+                if commands.is_empty() {
+                    Err(Error::event_error(
+                        "blocked: profile does not meet quality standards",
+                        event.id,
+                    ))
+                } else {
+                    println!("commands: {commands:?}");
+                    Ok(commands)
+                }
+            }
+            Err(e) => Err(Error::internal(format!("Filter error: {e}"))),
+        }
     }
 }

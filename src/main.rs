@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
 // HTML templates
@@ -568,8 +568,46 @@ async fn main() -> Result<()> {
         max_backoff: Duration::from_secs(max_backoff_secs),
     };
 
+    // Create gossip-enabled client for WebSocket connections
+    info!("Creating shared gossip client for WebSocket profile verification");
+    let gossip_keys = Keys::generate();
+
+    // Configure gossip client to be respectful of relays
+    let gossip_options = Options::new()
+        .gossip(true)
+        .max_avg_latency(Duration::from_secs(2)) // Skip slow relays
+        .automatic_authentication(true);
+
+    let gossip_client = Client::builder()
+        .signer(gossip_keys)
+        .opts(gossip_options)
+        .build();
+
+    // Add multiple discovery relays for better coverage
+    let discovery_relays = vec![
+        "wss://relay.nos.social",
+        "wss://relay.damus.io",
+        "wss://nos.lol",
+        "wss://relay.primal.net",
+    ];
+
+    for relay in discovery_relays.clone() {
+        if let Err(e) = gossip_client.add_discovery_relay(relay).await {
+            warn!("Failed to add discovery relay {}: {}", relay, e);
+        }
+    }
+
+    gossip_client.connect().await;
+    let gossip_client = Arc::new(gossip_client);
+
     // Create shared filter for both WebSocket and aggregation service
-    let profile_quality_filter = Arc::new(ProfileQualityFilter::new(database));
+    // Use the gossip client for WebSocket connections
+    let profile_quality_filter = Arc::new(ProfileQualityFilter::with_gossip_client(
+        database,
+        true, // skip_mostr
+        true, // skip_fields
+        gossip_client.clone(),
+    ));
 
     // Both services use the same filter
     let aggregation_service = ProfileAggregationService::new(
@@ -608,7 +646,7 @@ async fn main() -> Result<()> {
     // Create custom root handler that combines WebSocket and HTML
     let root_handler = {
         let relay_info = relay_info.clone();
-        move |ws: Option<axum::extract::WebSocketUpgrade>,
+        move |ws: Option<websocket_builder::WebSocketUpgrade>,
               ConnectInfo(addr): ConnectInfo<SocketAddr>,
               headers: HeaderMap| {
             let info = relay_info.clone();
@@ -616,8 +654,8 @@ async fn main() -> Result<()> {
             //let ws_h = ws_handler; //#.clone();
             async move {
                 // If it's a WebSocket upgrade, delegate to the WebSocket handler
-                if let Some(ws) = ws {
-                    return ws_handler(Some(ws), ConnectInfo(addr), headers).await;
+                if ws.is_some() {
+                    return ws_handler(ws, ConnectInfo(addr), headers).await;
                 }
 
                 // Check if client wants JSON (NIP-11)
@@ -694,6 +732,7 @@ async fn main() -> Result<()> {
     println!("- Picture: valid URL, min 300x600px");
     println!("- Verified: published text note via outbox relays");
     println!("- Excludes: bridges, mostr accounts, profiles with fields array");
+    println!("\nWebSocket profile verification: ENABLED");
     println!("\nConfiguration:");
     println!("- Page size: {page_size} events");
     println!("- Backoff: {initial_backoff_secs}s-{max_backoff_secs}s");
@@ -725,6 +764,10 @@ async fn main() -> Result<()> {
 
     // Signal all services to shutdown
     cancellation_token.cancel();
+
+    // Shutdown the gossip client
+    info!("Shutting down shared gossip client...");
+    gossip_client.shutdown().await;
 
     // Close the task tracker to prevent new tasks from being spawned
     task_tracker.close();
