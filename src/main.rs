@@ -398,6 +398,11 @@ async fn random_profiles_handler_impl(params: RandomQuery, headers: HeaderMap) -
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize rustls crypto provider
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // Load environment variables
     dotenv::dotenv().ok();
 
