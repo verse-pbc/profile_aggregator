@@ -4,7 +4,7 @@
 mkdir -p ./data
 
 # Set environment variables
-export RUST_LOG='profile_aggregator=info,nostr_relay_builder=info'
+export RUST_LOG='info'
 export RELAY_URL=ws://localhost:8080
 export BIND_ADDR=127.0.0.1:8080
 export RELAY_CONTACT=admin@relay.example
