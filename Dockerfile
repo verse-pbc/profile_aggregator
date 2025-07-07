@@ -16,8 +16,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY templates ./templates
 
-# Build the binary
-RUN cargo build --release
+# Build all binaries
+RUN cargo build --release --bins
 
 FROM debian:bookworm-slim
 
@@ -28,8 +28,10 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy the binary
-COPY --from=rust-builder /usr/src/app/target/release/profile_aggregator ./profile_aggregator
+# Copy all binaries
+COPY --from=rust-builder /usr/src/app/target/release/profile-aggregator ./profile-aggregator
+COPY --from=rust-builder /usr/src/app/target/release/export-import ./export-import
+COPY --from=rust-builder /usr/src/app/target/release/facesync ./facesync
 
 # Create data directory
 RUN mkdir -p ./data
@@ -50,4 +52,4 @@ ENV WORKER_THREADS=20
 ENV STATE_FILE=./data/aggregation_state.json
 ENV DATABASE_PATH=./data/profile_aggregator.db
 
-CMD ["./profile_aggregator"]
+CMD ["./profile-aggregator"]

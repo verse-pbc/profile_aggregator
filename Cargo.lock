@@ -2439,7 +2439,7 @@ dependencies = [
 [[package]]
 name = "nostr_relay_builder"
 version = "0.5.0-alpha.1"
-source = "git+https://github.com/verse-pbc/nostr_relay_builder?branch=main#7a3bb42827afd22d24b3a7bc76b6b8cd6d2b7ceb"
+source = "git+https://github.com/verse-pbc/nostr_relay_builder?branch=main#c4f2abe179f48a86834553ec6a4b798afbbc47c2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2862,6 +2862,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "clap",
  "console-subscriber",
  "dotenv",
  "flume",
@@ -2872,6 +2873,7 @@ dependencies = [
  "image",
  "imageinfo",
  "imagesize",
+ "indicatif",
  "nostr",
  "nostr-database",
  "nostr-lmdb",
@@ -4578,7 +4580,7 @@ dependencies = [
 [[package]]
 name = "websocket_builder"
 version = "0.2.0-alpha.1"
-source = "git+https://github.com/verse-pbc/websocket_builder#112bb4a688996f4b16e3b7077bb9c1bd7ec59fbd"
+source = "git+https://github.com/verse-pbc/websocket_builder#c8d374e9248bd79f447bcb82aabd44d41986668c"
 dependencies = [
  "anyhow",
  "async-trait",

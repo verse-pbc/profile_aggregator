@@ -15,4 +15,4 @@ echo "📁 Data will be stored in ./data/"
 echo ""
 
 # Run the server
-cargo run --release
+cargo run --bin profile-aggregator
