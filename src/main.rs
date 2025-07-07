@@ -10,6 +10,7 @@ use heavykeeper::TopK;
 use nostr_relay_builder::{CryptoHelper, RelayBuilder, RelayConfig, RelayDatabase, RelayInfo};
 use nostr_sdk::prelude::*;
 use profile_aggregator::{
+    avatar_sync::{self, AvatarSyncConfig},
     ProfileAggregationConfig, ProfileAggregationService, ProfileQualityFilter,
 };
 use serde::{Deserialize, Serialize};
@@ -445,6 +446,14 @@ async fn main() -> Result<()> {
     // Create CryptoHelper for the config
     let crypto_helper = CryptoHelper::new(Arc::new(keys.clone()));
     let database = Arc::new(database);
+
+    // Initialize global avatar sync client
+    let avatar_sync_config = AvatarSyncConfig::default();
+    if let Err(e) = avatar_sync::init_global_client(avatar_sync_config) {
+        warn!("Failed to initialize avatar sync client: {}", e);
+    } else {
+        info!("Avatar sync client initialized");
+    }
 
     // Initialize and periodically update profile count
     let database_clone = database.clone();

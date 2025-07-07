@@ -27,10 +27,6 @@ struct Args {
     #[arg(short, long, default_value = "10")]
     concurrency: usize,
 
-    /// Use HEAD requests instead of GET
-    #[arg(long)]
-    use_head: bool,
-
     /// Request timeout in seconds
     #[arg(short, long, default_value = "30")]
     timeout: u64,
@@ -62,7 +58,6 @@ async fn sync_profiles(
     db: NostrLMDB,
     base_url: String,
     concurrency: usize,
-    use_head: bool,
     timeout: Duration,
     skip_errors: bool,
 ) -> Result<()> {
@@ -83,8 +78,7 @@ async fn sync_profiles(
     }
 
     info!(
-        "Settings: {} requests, {} timeout, {}",
-        if use_head { "HEAD" } else { "GET" },
+        "Settings: GET requests, {}s timeout, {}",
         timeout.as_secs(),
         if skip_errors {
             "continue on errors"
@@ -129,26 +123,18 @@ async fn sync_profiles(
             let client = client.clone();
 
             let handle = tokio::spawn(async move {
-                let result = if use_head {
-                    client.head(&url).send().await
-                } else {
-                    client.get(&url).send().await
-                };
-
-                match result {
-                    Ok(response) => {
-                        if response.status().is_success() {
-                            Ok((pubkey, true))
-                        } else {
-                            Err(anyhow::anyhow!(
-                                "HTTP {} for {}: {}",
-                                response.status().as_u16(),
-                                pubkey,
-                                response.status()
-                            ))
-                        }
+                // Just send the request and check if it was sent successfully
+                // Don't wait for or process the response body
+                match client.get(&url).send().await {
+                    Ok(_) => {
+                        // Request sent successfully, we don't care about the response
+                        Ok((pubkey, true))
                     }
-                    Err(e) => Err(anyhow::anyhow!("Request failed for {}: {}", pubkey, e)),
+                    Err(e) => Err(anyhow::anyhow!(
+                        "Failed to send request for {}: {}",
+                        pubkey,
+                        e
+                    )),
                 }
             });
 
@@ -223,7 +209,6 @@ async fn main() -> Result<()> {
         database,
         args.base_url,
         args.concurrency,
-        args.use_head,
         Duration::from_secs(args.timeout),
         args.skip_errors,
     )

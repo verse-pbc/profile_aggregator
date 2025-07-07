@@ -1,5 +1,6 @@
 //! Profile quality filter implementation
 
+use crate::avatar_sync::AvatarSyncClient;
 use crate::profile_image_validator::{ImageInfo, ProfileImageValidator};
 use crate::rate_limit_manager::RateLimitManager;
 use async_trait::async_trait;
@@ -71,6 +72,7 @@ pub struct ProfileQualityFilter {
     skip_mostr: bool,
     skip_fields: bool,
     gossip_client: Option<Arc<Client>>,
+    avatar_sync_client: Option<Arc<AvatarSyncClient>>,
 }
 
 impl fmt::Debug for ProfileQualityFilter {
@@ -80,6 +82,7 @@ impl fmt::Debug for ProfileQualityFilter {
             .field("skip_mostr", &self.skip_mostr)
             .field("skip_fields", &self.skip_fields)
             .field("gossip_client", &self.gossip_client.is_some())
+            .field("avatar_sync_client", &self.avatar_sync_client.is_some())
             .finish()
     }
 }
@@ -91,6 +94,8 @@ impl ProfileQualityFilter {
 
     pub fn with_options(database: Arc<RelayDatabase>, skip_mostr: bool, skip_fields: bool) -> Self {
         let rate_limit_manager = Arc::new(RateLimitManager::new());
+        let avatar_sync_client = AvatarSyncClient::new_default().ok().map(Arc::new);
+
         Self {
             // Single image validator with shared rate limiter
             image_validator: Arc::new(
@@ -106,6 +111,7 @@ impl ProfileQualityFilter {
             skip_mostr,
             skip_fields,
             gossip_client: None,
+            avatar_sync_client,
         }
     }
 
@@ -117,6 +123,8 @@ impl ProfileQualityFilter {
         gossip_client: Arc<Client>,
     ) -> Self {
         let rate_limit_manager = Arc::new(RateLimitManager::new());
+        let avatar_sync_client = AvatarSyncClient::new_default().ok().map(Arc::new);
+
         Self {
             // Single image validator with shared rate limiter
             image_validator: Arc::new(
@@ -132,6 +140,7 @@ impl ProfileQualityFilter {
             skip_mostr,
             skip_fields,
             gossip_client: Some(gossip_client),
+            avatar_sync_client,
         }
     }
 
@@ -378,6 +387,11 @@ impl ProfileQualityFilter {
                         subdomain.clone(),
                         None,
                     )];
+
+                    // Trigger avatar sync for the accepted profile
+                    if let Some(ref avatar_sync_client) = self.avatar_sync_client {
+                        avatar_sync_client.trigger_sync(event.pubkey);
+                    }
 
                     // Add relay events since profile was accepted
                     for (relay_event, event_type) in relay_events {

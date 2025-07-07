@@ -1,3 +1,4 @@
+pub mod avatar_sync;
 pub mod profile_aggregation_service;
 pub mod profile_image_validator;
 pub mod profile_quality_filter;
