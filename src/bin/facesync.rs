@@ -61,15 +61,18 @@ async fn sync_profiles(
     timeout: Duration,
     skip_errors: bool,
 ) -> Result<()> {
+    println!("sync_profiles called with {concurrency} concurrent requests");
     info!("Fetching all metadata events (kind 0) from database...");
 
     // Query for all kind 0 events
     let filter = Filter::new().kind(Kind::Metadata);
+    println!("Querying database for kind 0 events...");
     let events = db
         .query(filter)
         .await
         .context("Failed to query metadata events")?;
 
+    println!("Database query completed");
     info!("Found {} profiles to sync", events.len());
 
     if events.is_empty() {
@@ -201,10 +204,33 @@ async fn main() -> Result<()> {
     setup_tracing();
     let args = Args::parse();
 
-    info!("Opening database at {:?}", args.database);
-    let database = NostrLMDB::open(&args.database)
-        .with_context(|| format!("Failed to open database at {:?}", args.database))?;
+    // Print startup message immediately
+    println!("Starting facesync...");
+    println!("Database path: {:?}", args.database);
 
+    // Check if database path exists
+    if !args.database.exists() {
+        eprintln!("Error: Database path does not exist: {:?}", args.database);
+        return Err(anyhow::anyhow!("Database path does not exist"));
+    }
+
+    info!("Opening database at {:?}", args.database);
+    let database = match NostrLMDB::open(&args.database) {
+        Ok(db) => {
+            println!("Database opened successfully");
+            db
+        }
+        Err(e) => {
+            eprintln!("Failed to open database: {e}");
+            return Err(anyhow::anyhow!(
+                "Failed to open database at {:?}: {}",
+                args.database,
+                e
+            ));
+        }
+    };
+
+    println!("Starting profile sync...");
     sync_profiles(
         database,
         args.base_url,
