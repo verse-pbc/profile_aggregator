@@ -10,11 +10,9 @@ use tokio_util::task::TaskTracker;
 
 fn create_test_setup() -> (Arc<ProfileValidator>, Arc<RelayDatabase>, CancellationToken) {
     let temp_dir = TempDir::new().unwrap();
-    let keys = Keys::generate();
     let cancellation_token = CancellationToken::new();
     let _task_tracker = TaskTracker::new();
-    let (database, db_sender) =
-        RelayDatabase::new(temp_dir.path(), Arc::new(keys.clone())).unwrap();
+    let (database, db_sender) = RelayDatabase::new(temp_dir.path()).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 

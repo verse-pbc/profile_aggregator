@@ -16,10 +16,8 @@ async fn test_real_time_subscription_integration() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_file = temp_dir.path().join("test_state.json");
 
-    let keys = Keys::generate();
     let task_tracker = TaskTracker::new();
-    let (database, db_sender) =
-        RelayDatabase::new(temp_dir.path().join("db"), Arc::new(keys)).unwrap();
+    let (database, db_sender) = RelayDatabase::new(temp_dir.path().join("db")).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 

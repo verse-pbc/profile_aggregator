@@ -6,8 +6,7 @@ use tempfile::TempDir;
 
 fn create_test_database() -> Arc<RelayDatabase> {
     let temp_dir = TempDir::new().unwrap();
-    let keys = Keys::generate();
-    let (database, _db_sender) = RelayDatabase::new(temp_dir.path(), Arc::new(keys)).unwrap();
+    let (database, _db_sender) = RelayDatabase::new(temp_dir.path()).unwrap();
     Arc::new(database)
 }
 
