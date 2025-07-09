@@ -11,6 +11,7 @@ use nostr_relay_builder::{RelayBuilder, RelayConfig, RelayDatabase, RelayInfo};
 use nostr_sdk::prelude::*;
 use profile_aggregator::{
     avatar_sync::{self, AvatarSyncConfig},
+    proxy_image_handler::proxy_image_handler,
     ProfileAggregationConfig, ProfileAggregationService, ProfileQualityFilter,
 };
 use serde::{Deserialize, Serialize};
@@ -701,6 +702,7 @@ async fn main() -> Result<()> {
         .route("/", get(root_handler))
         .route("/health", get(|| async { "OK" }))
         .route("/random", get(handler))
+        .route("/proxy-image", get(proxy_image_handler))
         .layer(cors);
 
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());

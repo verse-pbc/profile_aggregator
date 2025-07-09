@@ -3,6 +3,7 @@ pub mod profile_aggregation_service;
 pub mod profile_image_validator;
 pub mod profile_quality_filter;
 pub mod profile_validator;
+pub mod proxy_image_handler;
 pub mod rate_limit_manager;
 pub mod state;
 

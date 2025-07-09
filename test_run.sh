@@ -9,6 +9,7 @@ export RELAY_URL=ws://localhost:8080
 export BIND_ADDR=127.0.0.1:8080
 export RELAY_CONTACT=admin@relay.example
 export CONSUMER_RELAY_URL=wss://relay.nos.social
+export IMAGE_PROXY_SECRET=default-proxy-secret
 
 echo "🚀 Starting Profile Quality Relay Server..."
 echo "📁 Data will be stored in ./data/"

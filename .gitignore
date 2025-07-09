@@ -30,3 +30,4 @@ state.json
 # Test artifacts
 tarpaulin-report.html
 cobertura.xml
+.claude
