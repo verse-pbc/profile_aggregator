@@ -1,7 +1,7 @@
 //! Direct profile validation without worker pool
 
 use crate::profile_quality_filter::ProfileQualityFilter;
-use nostr_relay_builder::DatabaseSender;
+use nostr_relay_builder::{RelayDatabase, StoreCommand};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
@@ -76,7 +76,7 @@ pub struct DelayedRetry {
 /// Direct profile validator without worker pool
 pub struct ProfileValidator {
     filter: Arc<ProfileQualityFilter>,
-    db_sender: DatabaseSender,
+    database: Arc<RelayDatabase>,
     gossip_client: Arc<Client>,
     metrics: Arc<ProfileValidatorMetrics>,
     delayed_retries: Arc<RwLock<Vec<DelayedRetry>>>,
@@ -86,12 +86,12 @@ impl ProfileValidator {
     /// Create a new profile validator
     pub fn new(
         filter: Arc<ProfileQualityFilter>,
-        db_sender: DatabaseSender,
+        database: Arc<RelayDatabase>,
         gossip_client: Arc<Client>,
     ) -> Self {
         Self {
             filter,
-            db_sender,
+            database,
             gossip_client,
             metrics: Arc::new(ProfileValidatorMetrics::default()),
             delayed_retries: Arc::new(RwLock::new(Vec::new())),
@@ -153,8 +153,20 @@ impl ProfileValidator {
 
                 // Save to database
                 for cmd in commands {
-                    if let Err(e) = self.db_sender.send(cmd).await {
-                        warn!("Failed to save event: {}", e);
+                    match cmd {
+                        StoreCommand::SaveSignedEvent(event, scope, _) => {
+                            if let Err(e) = self.database.save_event(&event, &scope).await {
+                                warn!("Failed to save event: {}", e);
+                            }
+                        }
+                        StoreCommand::DeleteEvents(filter, scope, _) => {
+                            if let Err(e) = self.database.delete(filter, &scope).await {
+                                warn!("Failed to delete events: {}", e);
+                            }
+                        }
+                        _ => {
+                            warn!("Unsupported store command type");
+                        }
                     }
                 }
             }

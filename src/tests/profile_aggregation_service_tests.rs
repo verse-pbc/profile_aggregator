@@ -13,7 +13,7 @@ async fn create_test_service() -> (ProfileAggregationService, TempDir) {
 
     let task_tracker = TaskTracker::new();
     let cancellation_token = CancellationToken::new();
-    let (database, db_sender) = RelayDatabase::new(temp_dir.path().join("db")).unwrap();
+    let database = RelayDatabase::new(temp_dir.path().join("db")).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
@@ -27,7 +27,7 @@ async fn create_test_service() -> (ProfileAggregationService, TempDir) {
     };
 
     let service =
-        ProfileAggregationService::new(config, filter, db_sender, cancellation_token, task_tracker)
+        ProfileAggregationService::new(config, filter, db, cancellation_token, task_tracker)
             .await
             .unwrap();
 
@@ -72,7 +72,7 @@ async fn test_state_persistence() {
     // Create service with existing state
     let task_tracker = TaskTracker::new();
     let cancellation_token = CancellationToken::new();
-    let (database, db_sender) = RelayDatabase::new(temp_dir.path().join("db")).unwrap();
+    let database = RelayDatabase::new(temp_dir.path().join("db")).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
@@ -86,7 +86,7 @@ async fn test_state_persistence() {
     };
 
     let _service =
-        ProfileAggregationService::new(config, filter, db_sender, cancellation_token, task_tracker)
+        ProfileAggregationService::new(config, filter, db, cancellation_token, task_tracker)
             .await
             .unwrap();
 
@@ -130,7 +130,7 @@ async fn test_multiple_relay_configuration() {
 
     let task_tracker = TaskTracker::new();
     let cancellation_token = CancellationToken::new();
-    let (database, db_sender) = RelayDatabase::new(temp_dir.path().join("db")).unwrap();
+    let database = RelayDatabase::new(temp_dir.path().join("db")).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
@@ -150,7 +150,7 @@ async fn test_multiple_relay_configuration() {
     let _service = ProfileAggregationService::new(
         config.clone(),
         filter,
-        db_sender,
+        db,
         cancellation_token,
         task_tracker,
     )

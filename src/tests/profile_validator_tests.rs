@@ -12,7 +12,7 @@ fn create_test_setup() -> (Arc<ProfileValidator>, Arc<RelayDatabase>, Cancellati
     let temp_dir = TempDir::new().unwrap();
     let cancellation_token = CancellationToken::new();
     let _task_tracker = TaskTracker::new();
-    let (database, db_sender) = RelayDatabase::new(temp_dir.path()).unwrap();
+    let database = RelayDatabase::new(temp_dir.path()).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
@@ -20,7 +20,7 @@ fn create_test_setup() -> (Arc<ProfileValidator>, Arc<RelayDatabase>, Cancellati
     let keys = Keys::generate();
     let gossip_client = Arc::new(Client::new(keys));
 
-    let validator = Arc::new(ProfileValidator::new(filter, db_sender, gossip_client));
+    let validator = Arc::new(ProfileValidator::new(filter, db.clone(), gossip_client));
 
     (validator, db, cancellation_token)
 }

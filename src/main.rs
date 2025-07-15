@@ -436,13 +436,8 @@ async fn main() -> Result<()> {
 
     // The oldest timestamp will be discovered during the first cache refresh
 
-    // Create database with shared TaskTracker and CancellationToken
-    let (database, db_sender) = RelayDatabase::with_task_tracker_and_token(
-        &database_path,
-        task_tracker.clone(),
-        cancellation_token.clone(),
-    )?;
-
+    // Create database
+    let database = RelayDatabase::new(&database_path)?;
     let database = Arc::new(database);
 
     // Initialize global avatar sync client
@@ -542,7 +537,7 @@ async fn main() -> Result<()> {
     // Configure the relay
     let relay_url =
         std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:8080".to_string());
-    let config = RelayConfig::new(&relay_url, (database.clone(), db_sender.clone()), keys);
+    let config = RelayConfig::new(&relay_url, database.clone(), keys);
 
     // Get discovery relay URLs
     let discovery_relay_urls = vec![std::env::var("DISCOVERY_RELAY_URL")
@@ -581,7 +576,7 @@ async fn main() -> Result<()> {
     let gossip_keys = Keys::generate();
 
     // Configure gossip client to be respectful of relays
-    let gossip_options = Options::new()
+    let gossip_options = ClientOptions::new()
         .gossip(true)
         .max_avg_latency(Duration::from_secs(2)) // Skip slow relays
         .automatic_authentication(true);
@@ -611,7 +606,7 @@ async fn main() -> Result<()> {
     // Create shared filter for both WebSocket and aggregation service
     // Use the gossip client for WebSocket connections
     let profile_quality_filter = Arc::new(ProfileQualityFilter::with_gossip_client(
-        database,
+        database.clone(),
         true, // skip_mostr
         true, // skip_fields
         gossip_client.clone(),
@@ -621,7 +616,7 @@ async fn main() -> Result<()> {
     let aggregation_service = ProfileAggregationService::new(
         aggregation_config,
         profile_quality_filter.clone(),
-        db_sender,
+        database.clone(),
         cancellation_token.clone(),
         task_tracker.clone(),
     )
@@ -937,8 +932,7 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("test.db");
         let _task_tracker = tokio_util::task::TaskTracker::new();
-        let (database, db_sender) =
-            nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
+        let database = nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
         let database = Arc::new(database);
 
         // Create test profiles
@@ -964,10 +958,7 @@ mod tests {
         // Store profiles in database
         let scope = nostr_lmdb::Scope::Default;
         for event in &profiles {
-            db_sender
-                .save_signed_event(event.clone(), scope.clone())
-                .await
-                .unwrap();
+            database.save_event(event, &scope).await.unwrap();
         }
 
         // Allow time for database writes to complete
@@ -1030,8 +1021,7 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("test.db");
         let _task_tracker = tokio_util::task::TaskTracker::new();
-        let (database, db_sender) =
-            nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
+        let database = nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
         let database = Arc::new(database);
 
         // Create profiles spread across time
@@ -1058,10 +1048,7 @@ mod tests {
         // Store profiles
         let scope = nostr_lmdb::Scope::Default;
         for event in &profiles {
-            db_sender
-                .save_signed_event(event.clone(), scope.clone())
-                .await
-                .unwrap();
+            database.save_event(event, &scope).await.unwrap();
         }
 
         // Allow writes to complete

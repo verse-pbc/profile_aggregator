@@ -7,7 +7,7 @@ use crate::profile_quality_filter::ProfileQualityFilter;
 use crate::profile_validator::ProfileValidator;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use nostr_relay_builder::DatabaseSender;
+use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -95,7 +95,7 @@ impl ProfileAggregationService {
     pub async fn new(
         config: ProfileAggregationConfig,
         filter: Arc<ProfileQualityFilter>,
-        db_sender: DatabaseSender,
+        database: Arc<RelayDatabase>,
         cancellation_token: CancellationToken,
         task_tracker: TaskTracker,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -116,7 +116,7 @@ impl ProfileAggregationService {
         let gossip_keys = Keys::generate();
 
         // Configure gossip client to be respectful of relays
-        let gossip_options = Options::new()
+        let gossip_options = ClientOptions::new()
             .gossip(true)
             .max_avg_latency(Duration::from_secs(2)) // Skip slow relays
             .automatic_authentication(true);
@@ -147,7 +147,7 @@ impl ProfileAggregationService {
         // Create profile validator
         let validator = Arc::new(ProfileValidator::new(
             filter.clone(),
-            db_sender,
+            database,
             gossip_client.clone(),
         ));
 

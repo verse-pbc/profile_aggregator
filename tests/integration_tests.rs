@@ -17,7 +17,7 @@ async fn test_real_time_subscription_integration() {
     let state_file = temp_dir.path().join("test_state.json");
 
     let task_tracker = TaskTracker::new();
-    let (database, db_sender) = RelayDatabase::new(temp_dir.path().join("db")).unwrap();
+    let database = RelayDatabase::new(temp_dir.path().join("db")).unwrap();
     let db = Arc::new(database);
     let filter = Arc::new(ProfileQualityFilter::new(db.clone()));
 
@@ -31,10 +31,15 @@ async fn test_real_time_subscription_integration() {
     };
 
     let cancellation_token = CancellationToken::new();
-    let service =
-        ProfileAggregationService::new(config, filter, db_sender, cancellation_token, task_tracker)
-            .await
-            .unwrap();
+    let service = ProfileAggregationService::new(
+        config,
+        filter,
+        db.clone(),
+        cancellation_token,
+        task_tracker,
+    )
+    .await
+    .unwrap();
 
     // Start service in background
     let service_handle = tokio::spawn(async move {
