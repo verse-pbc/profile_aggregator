@@ -4,11 +4,9 @@ use crate::avatar_sync::AvatarSyncClient;
 use crate::profile_image_validator::{ImageInfo, ProfileImageValidator};
 use crate::rate_limit_manager::RateLimitManager;
 use async_trait::async_trait;
-use nostr_relay_builder::{
-    Error, EventContext, EventProcessor, RelayDatabase, Result, StoreCommand,
-};
 use nostr_sdk::prelude::*;
 use parking_lot;
+use relay_builder::{Error, EventContext, EventProcessor, RelayDatabase, Result, StoreCommand};
 use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
 use std::fmt;

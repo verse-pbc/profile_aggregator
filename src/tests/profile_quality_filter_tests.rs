@@ -1,6 +1,6 @@
 use crate::profile_quality_filter::{NostrProfileData, ProfileQualityFilter};
-use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
+use relay_builder::RelayDatabase;
 use std::sync::Arc;
 use tempfile::TempDir;
 

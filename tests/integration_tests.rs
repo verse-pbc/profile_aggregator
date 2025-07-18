@@ -1,8 +1,8 @@
-use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
 use profile_aggregator::{
     ProfileAggregationConfig, ProfileAggregationService, ProfileQualityFilter,
 };
+use relay_builder::RelayDatabase;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};

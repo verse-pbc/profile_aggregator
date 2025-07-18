@@ -1,7 +1,7 @@
 //! Global state management
 
-use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
+use relay_builder::RelayDatabase;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;

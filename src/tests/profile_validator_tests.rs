@@ -1,7 +1,7 @@
 use crate::profile_quality_filter::ProfileQualityFilter;
 use crate::profile_validator::{ProfileValidator, ProfileValidatorMetricsSnapshot};
-use nostr_relay_builder::RelayDatabase;
 use nostr_sdk::prelude::*;
+use relay_builder::RelayDatabase;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;

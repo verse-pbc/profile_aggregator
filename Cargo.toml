@@ -13,7 +13,7 @@ tower-http = { version = "0.5", features = ["cors"] }
 console-subscriber = "0.4"
 
 # Nostr dependencies
-nostr_relay_builder = { git = "https://github.com/verse-pbc/nostr_relay_builder", features = ["axum"] }
+relay_builder = { git = "https://github.com/verse-pbc/relay_builder", features = ["axum"] }
 websocket_builder = { git = "https://github.com/verse-pbc/websocket_builder" }
 nostr-sdk = { git = "https://github.com/verse-pbc/nostr", features = ["all-nips"] }
 nostr = { git = "https://github.com/verse-pbc/nostr", features = ["std"] }

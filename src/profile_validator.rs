@@ -1,8 +1,8 @@
 //! Direct profile validation without worker pool
 
 use crate::profile_quality_filter::ProfileQualityFilter;
-use nostr_relay_builder::{RelayDatabase, StoreCommand};
 use nostr_sdk::prelude::*;
+use relay_builder::{RelayDatabase, StoreCommand};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;

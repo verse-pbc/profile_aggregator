@@ -7,13 +7,13 @@ use axum::{
     Router,
 };
 use heavykeeper::TopK;
-use nostr_relay_builder::{RelayBuilder, RelayConfig, RelayDatabase, RelayInfo};
 use nostr_sdk::prelude::*;
 use profile_aggregator::{
     avatar_sync::{self, AvatarSyncConfig},
     proxy_image_handler::proxy_image_handler,
     ProfileAggregationConfig, ProfileAggregationService, ProfileQualityFilter,
 };
+use relay_builder::{RelayBuilder, RelayConfig, RelayDatabase, RelayInfo};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -415,7 +415,7 @@ async fn main() -> Result<()> {
     } else {
         // Setup normal logging if not using tokio-console
         let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("info,profile_aggregator=debug,nostr_relay_builder=debug,nostr_relay_pool::relay::inner=off")
+            EnvFilter::new("info,profile_aggregator=debug,relay_builder=debug,nostr_relay_pool::relay::inner=off")
         });
         fmt().with_env_filter(env_filter).with_target(true).init();
     }
@@ -932,7 +932,7 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("test.db");
         let _task_tracker = tokio_util::task::TaskTracker::new();
-        let database = nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
+        let database = relay_builder::RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
         let database = Arc::new(database);
 
         // Create test profiles
@@ -1021,7 +1021,7 @@ mod tests {
         let tmp_dir = TempDir::new().unwrap();
         let db_path = tmp_dir.path().join("test.db");
         let _task_tracker = tokio_util::task::TaskTracker::new();
-        let database = nostr_relay_builder::RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
+        let database = relay_builder::RelayDatabase::new(db_path.to_str().unwrap()).unwrap();
         let database = Arc::new(database);
 
         // Create profiles spread across time
